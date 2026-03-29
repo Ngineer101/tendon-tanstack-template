@@ -1,6 +1,5 @@
 import { defineConfig } from "vite-plus";
 import { devtools } from "@tanstack/devtools-vite";
-import tsconfigPaths from "vite-tsconfig-paths";
 
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 
@@ -13,10 +12,10 @@ const config = defineConfig({
     "*": "vp check --fix",
   },
   lint: { options: { typeAware: true, typeCheck: true } },
+  resolve: { tsconfigPaths: true },
   plugins: [
     devtools(),
     cloudflare({ viteEnvironment: { name: "ssr" } }),
-    tsconfigPaths({ projects: ["./tsconfig.json"] }),
     tailwindcss(),
     tanstackStart(),
     viteReact(),

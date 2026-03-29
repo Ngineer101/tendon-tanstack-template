@@ -12,10 +12,10 @@
     "test": "vp test run",
     "deploy": "pnpm run build && wrangler deploy",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
-    "db:push": "drizzle-kit push",
-    "db:pull": "drizzle-kit pull",
+    "db:migrate": "wrangler d1 migrations apply DB --local",
+    "db:migrate:prod": "wrangler d1 migrations apply DB",
     "db:studio": "drizzle-kit studio",
+    "cf-typegen": "npx wrangler types",
     "prepare": "vp config"
   },
   "dependencies": {
@@ -33,7 +33,6 @@
     "@tanstack/ai-react": "latest",
     "@tanstack/react-devtools": "latest",
     "@tanstack/react-query": "latest",
-    "@tanstack/react-query-devtools": "latest",
     "@tanstack/react-router": "latest",
     "@tanstack/react-router-devtools": "latest",
     "@tanstack/react-router-ssr-query": "latest",
@@ -76,7 +75,6 @@
     "typescript": "^5.7.2",
     "vite": "npm:@voidzero-dev/vite-plus-core@latest",
     "vite-plus": "latest",
-    "vite-tsconfig-paths": "^5.1.4",
     "vitest": "npm:@voidzero-dev/vite-plus-test@latest",
     "wrangler": "^4.70.0"
   },
