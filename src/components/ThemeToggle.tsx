@@ -57,7 +57,7 @@ export default function ThemeToggle() {
       onClick={toggleMode}
       aria-label={`Theme: ${mode}. Click to cycle.`}
       title={`Theme: ${mode}`}
-      className="relative flex h-8 w-8 items-center justify-center rounded-full text-(--sea-ink-soft) transition-colors hover:bg-(--chip-bg) hover:text-(--sea-ink)"
+      className="relative flex h-8 w-8 items-center justify-center rounded-full transition-colors hover:bg-(--chip-bg) hover:text-(--sea-ink)"
     >
       <div className="relative h-3.75 w-3.75">
         {(Object.keys(icons) as ThemeMode[]).map((m) => {
