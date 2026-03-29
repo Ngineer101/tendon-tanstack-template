@@ -1,4 +1,4 @@
-import { HeadContent, Scripts, createRootRouteWithContext } from "@tanstack/react-router";
+import { HeadContent, Link, Scripts, createRootRouteWithContext } from "@tanstack/react-router";
 import Footer from "../components/Footer";
 import Header from "../components/Header";
 import TanStackQueryProvider from "../integrations/tanstack-query/root-provider";
@@ -32,6 +32,7 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
       },
     ],
   }),
+  notFoundComponent: NotFound,
   shellComponent: RootDocument,
 });
 
@@ -51,5 +52,37 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <Scripts />
       </body>
     </html>
+  );
+}
+
+function NotFound() {
+  return (
+    <div className="flex min-h-[calc(100vh-3.5rem)] flex-col items-center justify-center px-4 py-20 text-center">
+      <p
+        className="select-none font-mono text-[8rem] font-bold leading-none tracking-tighter text-border sm:text-[12rem]"
+        style={{ animation: "not-found-float 4s ease-in-out infinite" }}
+      >
+        404
+      </p>
+
+      <style>{`
+        @keyframes not-found-float {
+          0%, 100% { transform: translateY(0px); }
+          50% { transform: translateY(-10px); }
+        }
+      `}</style>
+
+      <h1 className="mt-6 text-xl font-semibold tracking-tight">Page not found</h1>
+      <p className="mt-2 max-w-sm text-sm text-muted-foreground">
+        The page you're looking for doesn't exist or has been moved.
+      </p>
+
+      <Link
+        to="/"
+        className="mt-8 inline-flex h-8 items-center rounded-lg border border-border bg-background px-4 text-sm font-medium transition-colors hover:bg-muted"
+      >
+        Go home
+      </Link>
+    </div>
   );
 }
