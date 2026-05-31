@@ -3,5 +3,54 @@
   "name": "tanstack-start-app",
   "compatibility_date": "2025-09-02",
   "compatibility_flags": ["nodejs_compat"],
-  "main": "@tanstack/react-start/server-entry",
+  "main": "src/worker.ts",
+  "triggers": {
+    "crons": ["*/15 * * * *"],
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS_QUEUE",
+        "queue": "tanstack-start-app-jobs",
+      },
+    ],
+    "consumers": [
+      {
+        "queue": "tanstack-start-app-jobs",
+        "max_batch_size": 10,
+        "max_retries": 3,
+        "dead_letter_queue": "tanstack-start-app-jobs-dlq",
+      },
+    ],
+  },
+  "workflows": [
+    {
+      "binding": "EXAMPLE_WORKFLOW",
+      "name": "tanstack-start-app-example-workflow",
+      "class_name": "ExampleWorkflow",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "R2",
+      "bucket_name": "tanstack-start-app-assets",
+    },
+  ],
+  "ai": {
+    "binding": "AI",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tanstack-start-app-db",
+      "database_id": "replace-with-d1-database-id", // Replace with ID from: wrangler d1 create tanstack-start-app-db
+      "migrations_dir": "drizzle",
+    },
+  ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+    },
+  },
 }

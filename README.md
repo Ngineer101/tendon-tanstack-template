@@ -17,6 +17,31 @@ To build this application for production:
 pnpm build
 ```
 
+## Cloudflare Background Jobs
+
+This template includes light boilerplate for Cloudflare Queues, Cron Triggers, and Workflows.
+
+- `src/worker.ts` wires Cloudflare Worker events and delegates HTTP requests to TanStack Start.
+- `src/worker/queues.ts` defines queue message payloads and routes messages by `type`.
+- `src/worker/crons.ts` routes scheduled jobs by cron expression.
+- `src/worker/workflows.ts` exports workflow classes used by `wrangler.jsonc`.
+- `src/worker/jobs.ts` contains small helper functions that app code can call to enqueue jobs or start workflows.
+
+Before deploying a new app from this template, rename the placeholder resource names in `wrangler.jsonc` and create the backing Cloudflare resources:
+
+```bash
+pnpm exec wrangler queues create tanstack-start-app-jobs
+pnpm exec wrangler queues create tanstack-start-app-jobs-dlq
+pnpm exec wrangler d1 create tanstack-start-app-db
+pnpm exec wrangler r2 bucket create tanstack-start-app-assets
+```
+
+After changing `wrangler.jsonc`, regenerate Worker types:
+
+```bash
+pnpm cf-typegen
+```
+
 ## Testing
 
 This project uses [Vitest](https://vitest.dev/) for testing. You can run the tests with:
