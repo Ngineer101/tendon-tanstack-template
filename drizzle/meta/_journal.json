@@ -8,6 +8,13 @@
       "when": 1774807250816,
       "tag": "0000_wild_wolfpack",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1780257272334,
+      "tag": "0001_military_exodus",
+      "breakpoints": true
     }
   ]
 }
