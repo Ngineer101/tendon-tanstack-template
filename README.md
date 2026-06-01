@@ -17,6 +17,102 @@ To build this application for production:
 pnpm build
 ```
 
+## Stripe Billing
+
+This starter includes user-owned Stripe billing for two models that can be used at the same time:
+
+- Fixed monthly subscriptions unlock paid feature entitlements.
+- Prepaid credits are purchased up front and consumed by usage-based features.
+
+The example catalog has a `free` tier, a `pro_monthly` subscription with the `premium_dashboard`
+entitlement, three non-expiring credit packs (`1,000`, `5,000`, and `20,000` credits), and an
+`ai_generation` action costing `10` credits. Credit usage is blocked when the balance reaches zero.
+
+Catalog labels, display prices, entitlements, and credit costs live in `src/lib/billing/config.ts`.
+Stripe remains the source of truth for payments and subscription status. D1 stores a local
+subscription projection and an append-only credit ledger so feature checks stay fast.
+
+### Stripe Dashboard Setup
+
+1. In Stripe test mode, create a recurring monthly Pro product and three one-time credit-pack
+   products.
+2. Copy each Stripe Price ID into the matching variable in `.env.local`. Use `.env.example` as the
+   template.
+3. Enable and configure the Stripe Customer Portal in the Stripe Dashboard.
+4. Create a webhook endpoint for `https://<your-domain>/api/billing/webhook` and subscribe it to:
+   - `checkout.session.completed`
+   - `checkout.session.async_payment_succeeded`
+   - `customer.subscription.created`
+   - `customer.subscription.updated`
+   - `customer.subscription.deleted`
+5. Copy the endpoint signing secret to `STRIPE_WEBHOOK_SECRET`.
+6. Apply the D1 migration with `pnpm run db:migrate` locally and `pnpm run db:migrate:prod` in
+   production.
+
+For local webhook testing, install the Stripe CLI and forward events:
+
+```sh
+stripe listen --forward-to localhost:3000/api/billing/webhook
+```
+
+Set production secrets with Wrangler rather than committing them:
+
+```sh
+pnpm exec wrangler secret put STRIPE_SECRET_KEY
+pnpm exec wrangler secret put STRIPE_WEBHOOK_SECRET
+pnpm exec wrangler secret put STRIPE_PRO_MONTHLY_PRICE_ID
+pnpm exec wrangler secret put STRIPE_CREDITS_1000_PRICE_ID
+pnpm exec wrangler secret put STRIPE_CREDITS_5000_PRICE_ID
+pnpm exec wrangler secret put STRIPE_CREDITS_20000_PRICE_ID
+```
+
+To enable Stripe Tax after configuring it in the Dashboard, set `STRIPE_TAX_ENABLED=true` locally
+and add it as a Wrangler variable or secret in production.
+
+### Using Billing In Features
+
+Use the billing core from server-side feature code. Call `requireCredits` before doing paid work so
+the feature fails closed when the balance is too low:
+
+```ts
+import { hasEntitlement, requireCredits } from "#/lib/billing/core";
+
+const allowed = await hasEntitlement(env, userId, "premium_dashboard");
+await requireCredits(env, userId, "ai_generation");
+
+// Run the paid feature only after credits have been reserved successfully.
+```
+
+`requireCredits` debits the balance atomically and throws `InsufficientCreditsError` when the debit
+cannot be made. Its lower-level `consumeCredits` helper returns `{ consumed: false }` instead if a
+feature needs custom control flow. Both use a conditional D1 update so simultaneous requests cannot
+spend below zero.
+Stripe webhook handling is idempotent, and each credit purchase can only be granted once.
+
+For promotions or manual admin grants, call `grantCredits` from an admin-only server route:
+
+```ts
+await grantCredits(env, userId, 500, {
+  type: "admin_grant", // Use "promotion" for automated campaigns.
+  description: "Customer support credit",
+  reference: `admin-grant:${requestId}`,
+});
+```
+
+The unique reference is required to make retries safe. This starter intentionally does not expose
+an admin grant endpoint until the host app adds its own admin authorization policy.
+
+### Optional Product Decisions
+
+- Billing is attached to an individual user. Introduce an organization-owned billing account if
+  the product later adds teams.
+- Credits never expire. Add grant lots with expiry timestamps if the product needs expiration.
+- Credit balances cannot go negative. Change the conditional debit only if the product explicitly
+  supports overages.
+- The starter uses prepaid app credits, not Stripe Billing Credits. Stripe Billing Credits target
+  metered subscription invoicing rather than immediate in-app balance enforcement.
+- Display prices in `src/lib/billing/config.ts` must match the corresponding Stripe Price objects.
+
 ## Cloudflare Background Jobs
 
 This template includes light boilerplate for Cloudflare Queues, Cron Triggers, and Workflows.
