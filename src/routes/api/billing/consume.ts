@@ -1,8 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 import { authenticatedApiHandler } from "#/lib/api";
-import { BILLING_CATALOG, type BillingEnv } from "#/lib/billing/config";
-import { requireCredits } from "#/lib/billing/core";
+import { BILLING_CATALOG } from "#/lib/billing/config";
+import type { BillingEnv } from "#/lib/billing/config.server";
+import { requireCredits } from "#/lib/billing/core.server";
 
 export const Route = createFileRoute("/api/billing/consume")({
   server: {

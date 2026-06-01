@@ -75,7 +75,7 @@ Use the billing core from server-side feature code. Call `requireCredits` before
 the feature fails closed when the balance is too low:
 
 ```ts
-import { hasEntitlement, requireCredits } from "#/lib/billing/core";
+import { hasEntitlement, requireCredits } from "#/lib/billing/core.server";
 
 const allowed = await hasEntitlement(env, userId, "premium_dashboard");
 await requireCredits(env, userId, "ai_generation");

@@ -1,8 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 import { publicApiHandler } from "#/lib/api";
-import type { BillingEnv } from "#/lib/billing/config";
-import { handleStripeWebhook } from "#/lib/billing/core";
+import type { BillingEnv } from "#/lib/billing/config.server";
+import { handleStripeWebhook } from "#/lib/billing/core.server";
 
 export const Route = createFileRoute("/api/billing/webhook")({
   server: {
