@@ -149,3 +149,52 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+// User-owned MCP server connections. OAuth credentials and client registration
+// secrets are stored only in the encrypted payload column.
+export const mcpConnection = sqliteTable(
+  "mcp_connection",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    serverUrl: text("server_url").notNull(),
+    status: text("status").notNull().default("pending"),
+    authType: text("auth_type").notNull().default("oauth"),
+    credentialsEncrypted: text("credentials_encrypted"),
+    lastErrorCode: text("last_error_code"),
+    lastTestedAt: integer("last_tested_at", { mode: "timestamp" }),
+    lastConnectedAt: integer("last_connected_at", { mode: "timestamp" }),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [uniqueIndex("mcp_connection_user_url_unique").on(table.userId, table.serverUrl)],
+);
+
+// Short-lived OAuth handshakes. The PKCE verifier and any dynamic client
+// secret are encrypted; only a SHA-256 digest of the browser state is indexed.
+export const mcpOauthSession = sqliteTable(
+  "mcp_oauth_session",
+  {
+    id: text("id").primaryKey(),
+    connectionId: text("connection_id")
+      .notNull()
+      .references(() => mcpConnection.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    stateHash: text("state_hash").notNull(),
+    payloadEncrypted: text("payload_encrypted").notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [uniqueIndex("mcp_oauth_session_state_hash_unique").on(table.stateHash)],
+);

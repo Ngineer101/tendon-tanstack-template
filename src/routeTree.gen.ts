@@ -17,12 +17,18 @@ import { Route as ProtectedRouteImport } from './routes/_protected'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProtectedDashboardRouteImport } from './routes/_protected/dashboard'
 import { Route as ProtectedBillingRouteImport } from './routes/_protected/billing'
+import { Route as ApiMcpConnectionsRouteImport } from './routes/api/mcp/connections'
 import { Route as ApiBillingWebhookRouteImport } from './routes/api/billing/webhook'
 import { Route as ApiBillingSummaryRouteImport } from './routes/api/billing/summary'
 import { Route as ApiBillingPortalRouteImport } from './routes/api/billing/portal'
 import { Route as ApiBillingConsumeRouteImport } from './routes/api/billing/consume'
 import { Route as ApiBillingCheckoutRouteImport } from './routes/api/billing/checkout'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
+import { Route as ApiMcpOauthClientMetadataRouteImport } from './routes/api/mcp/oauth/client-metadata'
+import { Route as ApiMcpOauthCallbackRouteImport } from './routes/api/mcp/oauth/callback'
+import { Route as ApiMcpConnectionsConnectionIdRouteImport } from './routes/api/mcp/connections/$connectionId'
+import { Route as ApiMcpConnectionsConnectionIdTestRouteImport } from './routes/api/mcp/connections/$connectionId/test'
+import { Route as ApiMcpConnectionsConnectionIdOauthStartRouteImport } from './routes/api/mcp/connections/$connectionId/oauth/start'
 
 const SignUpRoute = SignUpRouteImport.update({
   id: '/sign-up',
@@ -63,6 +69,11 @@ const ProtectedBillingRoute = ProtectedBillingRouteImport.update({
   path: '/billing',
   getParentRoute: () => ProtectedRoute,
 } as any)
+const ApiMcpConnectionsRoute = ApiMcpConnectionsRouteImport.update({
+  id: '/api/mcp/connections',
+  path: '/api/mcp/connections',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiBillingWebhookRoute = ApiBillingWebhookRouteImport.update({
   id: '/api/billing/webhook',
   path: '/api/billing/webhook',
@@ -93,6 +104,35 @@ const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
   path: '/api/auth/$',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiMcpOauthClientMetadataRoute =
+  ApiMcpOauthClientMetadataRouteImport.update({
+    id: '/api/mcp/oauth/client-metadata',
+    path: '/api/mcp/oauth/client-metadata',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiMcpOauthCallbackRoute = ApiMcpOauthCallbackRouteImport.update({
+  id: '/api/mcp/oauth/callback',
+  path: '/api/mcp/oauth/callback',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiMcpConnectionsConnectionIdRoute =
+  ApiMcpConnectionsConnectionIdRouteImport.update({
+    id: '/$connectionId',
+    path: '/$connectionId',
+    getParentRoute: () => ApiMcpConnectionsRoute,
+  } as any)
+const ApiMcpConnectionsConnectionIdTestRoute =
+  ApiMcpConnectionsConnectionIdTestRouteImport.update({
+    id: '/test',
+    path: '/test',
+    getParentRoute: () => ApiMcpConnectionsConnectionIdRoute,
+  } as any)
+const ApiMcpConnectionsConnectionIdOauthStartRoute =
+  ApiMcpConnectionsConnectionIdOauthStartRouteImport.update({
+    id: '/oauth/start',
+    path: '/oauth/start',
+    getParentRoute: () => ApiMcpConnectionsConnectionIdRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -108,6 +148,12 @@ export interface FileRoutesByFullPath {
   '/api/billing/portal': typeof ApiBillingPortalRoute
   '/api/billing/summary': typeof ApiBillingSummaryRoute
   '/api/billing/webhook': typeof ApiBillingWebhookRoute
+  '/api/mcp/connections': typeof ApiMcpConnectionsRouteWithChildren
+  '/api/mcp/connections/$connectionId': typeof ApiMcpConnectionsConnectionIdRouteWithChildren
+  '/api/mcp/oauth/callback': typeof ApiMcpOauthCallbackRoute
+  '/api/mcp/oauth/client-metadata': typeof ApiMcpOauthClientMetadataRoute
+  '/api/mcp/connections/$connectionId/test': typeof ApiMcpConnectionsConnectionIdTestRoute
+  '/api/mcp/connections/$connectionId/oauth/start': typeof ApiMcpConnectionsConnectionIdOauthStartRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -123,6 +169,12 @@ export interface FileRoutesByTo {
   '/api/billing/portal': typeof ApiBillingPortalRoute
   '/api/billing/summary': typeof ApiBillingSummaryRoute
   '/api/billing/webhook': typeof ApiBillingWebhookRoute
+  '/api/mcp/connections': typeof ApiMcpConnectionsRouteWithChildren
+  '/api/mcp/connections/$connectionId': typeof ApiMcpConnectionsConnectionIdRouteWithChildren
+  '/api/mcp/oauth/callback': typeof ApiMcpOauthCallbackRoute
+  '/api/mcp/oauth/client-metadata': typeof ApiMcpOauthClientMetadataRoute
+  '/api/mcp/connections/$connectionId/test': typeof ApiMcpConnectionsConnectionIdTestRoute
+  '/api/mcp/connections/$connectionId/oauth/start': typeof ApiMcpConnectionsConnectionIdOauthStartRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -140,6 +192,12 @@ export interface FileRoutesById {
   '/api/billing/portal': typeof ApiBillingPortalRoute
   '/api/billing/summary': typeof ApiBillingSummaryRoute
   '/api/billing/webhook': typeof ApiBillingWebhookRoute
+  '/api/mcp/connections': typeof ApiMcpConnectionsRouteWithChildren
+  '/api/mcp/connections/$connectionId': typeof ApiMcpConnectionsConnectionIdRouteWithChildren
+  '/api/mcp/oauth/callback': typeof ApiMcpOauthCallbackRoute
+  '/api/mcp/oauth/client-metadata': typeof ApiMcpOauthClientMetadataRoute
+  '/api/mcp/connections/$connectionId/test': typeof ApiMcpConnectionsConnectionIdTestRoute
+  '/api/mcp/connections/$connectionId/oauth/start': typeof ApiMcpConnectionsConnectionIdOauthStartRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -157,6 +215,12 @@ export interface FileRouteTypes {
     | '/api/billing/portal'
     | '/api/billing/summary'
     | '/api/billing/webhook'
+    | '/api/mcp/connections'
+    | '/api/mcp/connections/$connectionId'
+    | '/api/mcp/oauth/callback'
+    | '/api/mcp/oauth/client-metadata'
+    | '/api/mcp/connections/$connectionId/test'
+    | '/api/mcp/connections/$connectionId/oauth/start'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -172,6 +236,12 @@ export interface FileRouteTypes {
     | '/api/billing/portal'
     | '/api/billing/summary'
     | '/api/billing/webhook'
+    | '/api/mcp/connections'
+    | '/api/mcp/connections/$connectionId'
+    | '/api/mcp/oauth/callback'
+    | '/api/mcp/oauth/client-metadata'
+    | '/api/mcp/connections/$connectionId/test'
+    | '/api/mcp/connections/$connectionId/oauth/start'
   id:
     | '__root__'
     | '/'
@@ -188,6 +258,12 @@ export interface FileRouteTypes {
     | '/api/billing/portal'
     | '/api/billing/summary'
     | '/api/billing/webhook'
+    | '/api/mcp/connections'
+    | '/api/mcp/connections/$connectionId'
+    | '/api/mcp/oauth/callback'
+    | '/api/mcp/oauth/client-metadata'
+    | '/api/mcp/connections/$connectionId/test'
+    | '/api/mcp/connections/$connectionId/oauth/start'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -203,6 +279,9 @@ export interface RootRouteChildren {
   ApiBillingPortalRoute: typeof ApiBillingPortalRoute
   ApiBillingSummaryRoute: typeof ApiBillingSummaryRoute
   ApiBillingWebhookRoute: typeof ApiBillingWebhookRoute
+  ApiMcpConnectionsRoute: typeof ApiMcpConnectionsRouteWithChildren
+  ApiMcpOauthCallbackRoute: typeof ApiMcpOauthCallbackRoute
+  ApiMcpOauthClientMetadataRoute: typeof ApiMcpOauthClientMetadataRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -263,6 +342,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProtectedBillingRouteImport
       parentRoute: typeof ProtectedRoute
     }
+    '/api/mcp/connections': {
+      id: '/api/mcp/connections'
+      path: '/api/mcp/connections'
+      fullPath: '/api/mcp/connections'
+      preLoaderRoute: typeof ApiMcpConnectionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/billing/webhook': {
       id: '/api/billing/webhook'
       path: '/api/billing/webhook'
@@ -305,6 +391,41 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiAuthSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/mcp/oauth/client-metadata': {
+      id: '/api/mcp/oauth/client-metadata'
+      path: '/api/mcp/oauth/client-metadata'
+      fullPath: '/api/mcp/oauth/client-metadata'
+      preLoaderRoute: typeof ApiMcpOauthClientMetadataRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mcp/oauth/callback': {
+      id: '/api/mcp/oauth/callback'
+      path: '/api/mcp/oauth/callback'
+      fullPath: '/api/mcp/oauth/callback'
+      preLoaderRoute: typeof ApiMcpOauthCallbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mcp/connections/$connectionId': {
+      id: '/api/mcp/connections/$connectionId'
+      path: '/$connectionId'
+      fullPath: '/api/mcp/connections/$connectionId'
+      preLoaderRoute: typeof ApiMcpConnectionsConnectionIdRouteImport
+      parentRoute: typeof ApiMcpConnectionsRoute
+    }
+    '/api/mcp/connections/$connectionId/test': {
+      id: '/api/mcp/connections/$connectionId/test'
+      path: '/test'
+      fullPath: '/api/mcp/connections/$connectionId/test'
+      preLoaderRoute: typeof ApiMcpConnectionsConnectionIdTestRouteImport
+      parentRoute: typeof ApiMcpConnectionsConnectionIdRoute
+    }
+    '/api/mcp/connections/$connectionId/oauth/start': {
+      id: '/api/mcp/connections/$connectionId/oauth/start'
+      path: '/oauth/start'
+      fullPath: '/api/mcp/connections/$connectionId/oauth/start'
+      preLoaderRoute: typeof ApiMcpConnectionsConnectionIdOauthStartRouteImport
+      parentRoute: typeof ApiMcpConnectionsConnectionIdRoute
+    }
   }
 }
 
@@ -322,6 +443,36 @@ const ProtectedRouteWithChildren = ProtectedRoute._addFileChildren(
   ProtectedRouteChildren,
 )
 
+interface ApiMcpConnectionsConnectionIdRouteChildren {
+  ApiMcpConnectionsConnectionIdTestRoute: typeof ApiMcpConnectionsConnectionIdTestRoute
+  ApiMcpConnectionsConnectionIdOauthStartRoute: typeof ApiMcpConnectionsConnectionIdOauthStartRoute
+}
+
+const ApiMcpConnectionsConnectionIdRouteChildren: ApiMcpConnectionsConnectionIdRouteChildren =
+  {
+    ApiMcpConnectionsConnectionIdTestRoute:
+      ApiMcpConnectionsConnectionIdTestRoute,
+    ApiMcpConnectionsConnectionIdOauthStartRoute:
+      ApiMcpConnectionsConnectionIdOauthStartRoute,
+  }
+
+const ApiMcpConnectionsConnectionIdRouteWithChildren =
+  ApiMcpConnectionsConnectionIdRoute._addFileChildren(
+    ApiMcpConnectionsConnectionIdRouteChildren,
+  )
+
+interface ApiMcpConnectionsRouteChildren {
+  ApiMcpConnectionsConnectionIdRoute: typeof ApiMcpConnectionsConnectionIdRouteWithChildren
+}
+
+const ApiMcpConnectionsRouteChildren: ApiMcpConnectionsRouteChildren = {
+  ApiMcpConnectionsConnectionIdRoute:
+    ApiMcpConnectionsConnectionIdRouteWithChildren,
+}
+
+const ApiMcpConnectionsRouteWithChildren =
+  ApiMcpConnectionsRoute._addFileChildren(ApiMcpConnectionsRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ProtectedRoute: ProtectedRouteWithChildren,
@@ -335,6 +486,9 @@ const rootRouteChildren: RootRouteChildren = {
   ApiBillingPortalRoute: ApiBillingPortalRoute,
   ApiBillingSummaryRoute: ApiBillingSummaryRoute,
   ApiBillingWebhookRoute: ApiBillingWebhookRoute,
+  ApiMcpConnectionsRoute: ApiMcpConnectionsRouteWithChildren,
+  ApiMcpOauthCallbackRoute: ApiMcpOauthCallbackRoute,
+  ApiMcpOauthClientMetadataRoute: ApiMcpOauthClientMetadataRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
