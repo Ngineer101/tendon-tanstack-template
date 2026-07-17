@@ -141,6 +141,55 @@ export const creditTransaction = sqliteTable(
   (table) => [uniqueIndex("credit_transaction_reference_unique").on(table.reference)],
 );
 
+// MCP server tables
+export const mcpServer = sqliteTable(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    serverUrl: text("server_url").notNull(),
+    status: text("status").notNull(),
+    authType: text("auth_type").notNull(),
+    // Non-secret OAuth metadata (endpoints, client id) as JSON.
+    oauthConfig: text("oauth_config"),
+    // AES-GCM encrypted JSON (tokens, client secret). Never returned to the client.
+    authData: text("auth_data"),
+    serverInfo: text("server_info"),
+    lastError: text("last_error"),
+    lastConnectedAt: integer("last_connected_at", { mode: "timestamp" }),
+    lastCheckedAt: integer("last_checked_at", { mode: "timestamp" }),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [
+    uniqueIndex("mcp_server_user_id_server_url_unique").on(table.userId, table.serverUrl),
+  ],
+);
+
+export const mcpAuthSession = sqliteTable("mcp_auth_session", {
+  // The OAuth `state` parameter (256 bits of entropy).
+  state: text("state").primaryKey(),
+  serverId: text("server_id")
+    .notNull()
+    .references(() => mcpServer.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  // AES-GCM encrypted PKCE code verifier.
+  codeVerifier: text("code_verifier").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
 export const stripeEvent = sqliteTable("stripe_event", {
   id: text("id").primaryKey(),
   type: text("type").notNull(),
