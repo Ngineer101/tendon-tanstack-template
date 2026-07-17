@@ -13,3 +13,4 @@ __unconfig*
 todos.json
 .zed
 .vscode
+.dev.vars*
