@@ -113,6 +113,22 @@ an admin grant endpoint until the host app adds its own admin authorization poli
   metered subscription invoicing rather than immediate in-app balance enforcement.
 - Display prices in `src/lib/billing/config.ts` must match the corresponding Stripe Price objects.
 
+## MCP Server Connections
+
+Users can connect Model Context Protocol (MCP) servers from `/dashboard` — with OAuth discovery,
+PKCE authorization, and AES-256-GCM encrypted credential storage. Free-plan users can connect up
+to 3 servers; the Pro plan unlocks unlimited connections via the `unlimited_mcp_servers`
+entitlement.
+
+Set the encryption key as an environment secret (generate with `openssl rand -base64 32`):
+
+```sh
+pnpm exec wrangler secret put MCP_ENCRYPTION_KEY
+```
+
+See `docs/mcp-servers.md` for the architecture, connection flow, security controls, and all
+implementation decisions.
+
 ## Cloudflare Background Jobs
 
 This template includes light boilerplate for Cloudflare Queues, Cron Triggers, and Workflows.

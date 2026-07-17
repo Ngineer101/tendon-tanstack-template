@@ -149,3 +149,48 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+// MCP server connections
+export const mcpServer = sqliteTable(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    url: text("url").notNull(),
+    status: text("status").notNull().default("requires_auth"),
+    authType: text("auth_type").notNull().default("oauth"),
+    // AES-256-GCM encrypted token bundle (never decrypted outside server code).
+    encryptedAuth: text("encrypted_auth"),
+    // Metadata reported by the MCP server during the initialize handshake.
+    serverName: text("server_name"),
+    serverVersion: text("server_version"),
+    lastError: text("last_error"),
+    lastTestedAt: integer("last_tested_at", { mode: "timestamp" }),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [uniqueIndex("mcp_server_user_id_url_unique").on(table.userId, table.url)],
+);
+
+// Short-lived state for in-flight MCP OAuth authorization flows.
+export const mcpOauthTransaction = sqliteTable("mcp_oauth_transaction", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  serverUrl: text("server_url").notNull(),
+  serverName: text("server_name").notNull(),
+  // AES-256-GCM encrypted payload: client registration + PKCE verifier + endpoints.
+  encryptedPayload: text("encrypted_payload").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
