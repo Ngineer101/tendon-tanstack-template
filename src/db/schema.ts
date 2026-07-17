@@ -141,6 +141,57 @@ export const creditTransaction = sqliteTable(
   (table) => [uniqueIndex("credit_transaction_reference_unique").on(table.reference)],
 );
 
+// MCP server connections
+export const mcpServer = sqliteTable(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    url: text("url").notNull(),
+    status: text("status").notNull().default("pending_auth"),
+    authType: text("auth_type"),
+    oauthIssuer: text("oauth_issuer"),
+    oauthMetadata: text("oauth_metadata"),
+    clientId: text("client_id"),
+    clientSecretEnc: text("client_secret_enc"),
+    accessTokenEnc: text("access_token_enc"),
+    refreshTokenEnc: text("refresh_token_enc"),
+    accessTokenExpiresAt: integer("access_token_expires_at", { mode: "timestamp" }),
+    scope: text("scope"),
+    serverInfo: text("server_info"),
+    lastConnectedAt: integer("last_connected_at", { mode: "timestamp" }),
+    lastTestedAt: integer("last_tested_at", { mode: "timestamp" }),
+    lastError: text("last_error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [uniqueIndex("mcp_server_user_id_url_unique").on(table.userId, table.url)],
+);
+
+export const mcpOauthSession = sqliteTable("mcp_oauth_session", {
+  state: text("state").primaryKey(),
+  serverId: text("server_id")
+    .notNull()
+    .references(() => mcpServer.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  codeVerifierEnc: text("code_verifier_enc").notNull(),
+  redirectUri: text("redirect_uri").notNull(),
+  resource: text("resource").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
 export const stripeEvent = sqliteTable("stripe_event", {
   id: text("id").primaryKey(),
   type: text("type").notNull(),

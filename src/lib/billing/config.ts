@@ -6,8 +6,11 @@ export const BILLING_CATALOG = {
       priceEnv: "STRIPE_PRO_MONTHLY_PRICE_ID",
       displayPrice: "$20",
       interval: "month",
-      entitlements: ["premium_dashboard"],
+      entitlements: ["premium_dashboard", "unlimited_mcp_servers"],
     },
+  },
+  limits: {
+    freeMcpServers: 3,
   },
   creditPacks: {
     credits_1000: {
