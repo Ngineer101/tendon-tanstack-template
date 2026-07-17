@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { CreditCard } from "lucide-react";
 
+import { McpServers } from "#/components/mcp/McpServers";
 import { Button } from "#/components/ui/button";
 
 export const Route = createFileRoute("/_protected/dashboard")({
@@ -20,6 +21,8 @@ function RouteComponent() {
           Open billing
         </Link>
       </Button>
+
+      <McpServers />
     </div>
   );
 }

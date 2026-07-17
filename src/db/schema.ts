@@ -149,3 +149,40 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+// MCP servers connected by a user for use in chat sessions.
+//
+// `encrypted_auth` stores the OAuth token response (and any refresh token)
+// AES-GCM encrypted with a key from environment secrets. It is never sent
+// back to the client. `oauth_pending` similarly stores the PKCE verifier and
+// state while an authorization flow is in flight, also encrypted at rest.
+export const mcpServer = sqliteTable(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    // Canonical server URL (scheme + host + port + path) without credentials/fragment.
+    url: text("url").notNull(),
+    // Lifecycle state: pending (created, awaiting auth) | connected | error | disconnected.
+    status: text("status").notNull().default("pending"),
+    // Public OAuth metadata discovered from the server, safe to return to the client.
+    metadata: text("metadata"),
+    // Encrypted OAuth token response (access_token, refresh_token, expires_at, scope).
+    encryptedAuth: text("encrypted_auth"),
+    // Encrypted pending OAuth flow state (code_verifier + state + redirect_uri + created_at).
+    oauthPending: text("oauth_pending"),
+    lastError: text("last_error"),
+    lastTestedAt: integer("last_tested_at", { mode: "timestamp" }),
+    serverInfo: text("server_info"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [uniqueIndex("mcp_server_user_url_unique").on(table.userId, table.url)],
+);
