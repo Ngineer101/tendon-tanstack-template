@@ -69,6 +69,55 @@ pnpm exec wrangler secret put STRIPE_CREDITS_20000_PRICE_ID
 To enable Stripe Tax after configuring it in the Dashboard, set `STRIPE_TAX_ENABLED=true` locally
 and add it as a Wrangler variable or secret in production.
 
+## MCP Server Connections
+
+The dashboard lets users connect Model Context Protocol (MCP) servers they
+own. Free users can connect up to **3** MCP servers; Pro subscribers have an
+unlimited allowance. The limit is enforced server-side via the existing
+billing entitlement check (`premium_dashboard`).
+
+Each connection performs the OAuth 2.1 + PKCE flow against the server's
+authorization server metadata, discovered at
+`<server_url>/.well-known/oauth-authorization-server`. OAuth tokens are
+encrypted at rest with AES-GCM using the env-managed `MCP_ENCRYPTION_KEY` and
+are never returned to the client.
+
+### Setup
+
+1. Generate a 32-byte key and add it to `.env.local`:
+
+   ```sh
+   pnpm exec tsx src/lib/mcp/scripts/generate-key.ts
+   ```
+
+   Copy the printed value into `MCP_ENCRYPTION_KEY`.
+
+2. Set the production secret:
+
+   ```sh
+   pnpm exec wrangler secret put MCP_ENCRYPTION_KEY
+   ```
+
+3. Apply the D1 migration:
+
+   ```sh
+   pnpm run db:migrate        # local
+   pnpm run db:migrate:prod   # production
+   ```
+
+4. (Optional) Override the OAuth callback URL with
+   `MCP_OAUTH_REDIRECT_URL` when serving the app from a custom domain.
+
+### Security notes
+
+- The encryption key must live in environment secrets — never in code or the
+  database.
+- Server URLs must use `https:` (except `localhost` in local dev). Raw private
+  / loopback / link-local IPs and known cloud metadata endpoints are blocked,
+  and redirect chains during discovery are re-validated defensively against
+  SSRF.
+- Auth data is stored encrypted; the API never returns tokens to the client.
+
 ### Using Billing In Features
 
 Use the billing core from server-side feature code. Call `requireCredits` before doing paid work so
