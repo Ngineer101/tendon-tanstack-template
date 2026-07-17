@@ -138,12 +138,12 @@ export async function createServer(
     throw new ApiError(400, "Label must be 128 characters or fewer");
   }
 
-  await checkServerLimit(env, userId);
-
   const safeCheck = isSafeUrl(params.serverUrl);
   if (!safeCheck.valid) {
     throw new ApiError(400, safeCheck.reason ?? "Invalid server URL");
   }
+
+  await checkServerLimit(env, userId);
 
   const baseUrl = params.serverUrl.replace(/\/$/, "");
   const { discovery } = await discoverOAuth(baseUrl);

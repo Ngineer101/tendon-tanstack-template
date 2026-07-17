@@ -107,6 +107,29 @@
 **Decision:** Hardcoded client ID `"mcp-client"` for OAuth flows.
 **Rationale:** For an open-standard MCP ecosystem, dynamic client registration is not universally supported. Using a consistent client ID simplifies integration. This could be made configurable per-server in the future.
 
+## Post-implementation Fixes and Additions
+
+### 19. URL Validation Before Limit Check
+
+**Fix:** Moved `isSafeUrl` validation before `checkServerLimit` in `createServer`.
+**Rationale:** The URL should be validated before consuming a billing lookup. An invalid URL early-rejects without touching the billing system or counting against the free limit.
+
+### 20. Comprehensive Domain Logic Tests
+
+**Addition:** Created `src/lib/mcp/__tests__/core.test.ts` with 21 test cases covering:
+
+- Server listing (empty state, mapped summaries)
+- Server retrieval with cross-user authorization checks
+- Free tier limit enforcement (under limit, exactly at limit, above limit)
+- Input validation (empty labels, length limits, unsafe URLs, localhost)
+- Update and delete authorization guards (cross-user protection)
+- Test connection preconditions (unauthenticated server)
+- Reconnect preconditions (missing URL, non-existent server)
+
+### 21. OAuth Callback Refactor
+
+**Fix:** Refactored the callback handler to use a shared `oauthHtmlPage` helper and included a `window.opener.postMessage("mcp-oauth-complete", "*")` script in every response. This enables the `McpConnectDialog` and `McpServerCard` reconnect flows to detect OAuth completion immediately via the `message` event listener, in addition to the existing popup-close polling fallback.
+
 ## Things That Could Not Be Fully Verified
 
 ### 1. Actual MCP Server OAuth Discovery
@@ -119,7 +142,7 @@ The OAuth discovery flow fetches `/.well-known/oauth-authorization-server` per t
 
 ### 3. Popup Window Behavior
 
-The popup-based OAuth flow was designed but cannot be verified without a real OAuth server. Cross-origin `window.postMessage` for the "mcp-oauth-complete" event relies on the callback page sending the message. In the current implementation, the OAuth callback page renders HTML success/error pages but does NOT call `window.opener.postMessage`. The fallback is the interval-based popup-close detection. **This should be addressed before production use**: the callback HTML page should include a script that posts a message to `window.opener`.
+The popup-based OAuth flow now includes `window.opener.postMessage` on callback pages. This was implemented but cannot be verified end-to-end without a real OAuth authorization server.
 
 ### 4. Refresh Token Flow
 
@@ -131,4 +154,4 @@ The migration SQL file was created but not applied. The `wrangler d1 migrations 
 
 ### 6. Screenshot of the Feature
 
-Attempted but requires a running dev server with database setup. Could not be completed in the current environment without running migrations.
+Requires a running dev server with database setup. Could not be completed in the current environment without running migrations.
