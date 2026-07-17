@@ -141,6 +141,59 @@ export const creditTransaction = sqliteTable(
   (table) => [uniqueIndex("credit_transaction_reference_unique").on(table.reference)],
 );
 
+// MCP server connections
+export const mcpServer = sqliteTable(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    serverUrl: text("server_url").notNull(),
+    // pending_auth | connected | error
+    status: text("status").notNull().default("pending_auth"),
+    // oauth | none
+    authType: text("auth_type").notNull().default("oauth"),
+    // AES-GCM encrypted JSON blob with tokens and client credentials; never sent to the client
+    encryptedAuth: text("encrypted_auth"),
+    // Non-secret OAuth discovery metadata (endpoints, client id) as JSON
+    oauthMetadata: text("oauth_metadata"),
+    serverName: text("server_name"),
+    serverVersion: text("server_version"),
+    toolCount: integer("tool_count"),
+    lastError: text("last_error"),
+    lastConnectedAt: integer("last_connected_at", { mode: "timestamp" }),
+    lastCheckedAt: integer("last_checked_at", { mode: "timestamp" }),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [
+    uniqueIndex("mcp_server_user_id_server_url_unique").on(table.userId, table.serverUrl),
+  ],
+);
+
+// Short-lived OAuth authorization state (the id doubles as the OAuth `state` parameter)
+export const mcpOauthSession = sqliteTable("mcp_oauth_session", {
+  id: text("id").primaryKey(),
+  serverId: text("server_id")
+    .notNull()
+    .references(() => mcpServer.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  // AES-GCM encrypted JSON blob with PKCE verifier and token endpoint details
+  encryptedPayload: text("encrypted_payload").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
 export const stripeEvent = sqliteTable("stripe_event", {
   id: text("id").primaryKey(),
   type: text("type").notNull(),
