@@ -146,6 +146,17 @@ This project uses [Vitest](https://vitest.dev/) for testing. You can run the tes
 pnpm test
 ```
 
+## MCP Server Connections
+
+Authenticated users can configure remote MCP servers from `/dashboard`. Free users are limited to
+three configured servers; Pro users have the `unlimited_mcp_servers` entitlement. The feature includes
+OAuth discovery, PKCE authorization, encrypted credential storage, health tests, refresh, edit,
+reconnect, and disconnect flows.
+
+See [`docs/mcp-connections.md`](docs/mcp-connections.md) for the required encryption secret, manual
+migration step, chat integration helper, security model, implementation decisions, and unverified
+external-provider behavior.
+
 ## Styling
 
 This project uses [Tailwind CSS](https://tailwindcss.com/) for styling.

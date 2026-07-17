@@ -1,4 +1,5 @@
 import type { QueueMessage } from "./queues";
+import { deleteExpiredMcpOauthSessions } from "#/lib/mcp/core.server";
 
 export async function handleCron(
   event: ScheduledController,
@@ -7,10 +8,13 @@ export async function handleCron(
 ) {
   switch (event.cron) {
     case "*/15 * * * *":
-      await env.JOBS_QUEUE.send({
-        type: "sync-account",
-        accountId: "example-account",
-      } satisfies QueueMessage);
+      await Promise.all([
+        env.JOBS_QUEUE.send({
+          type: "sync-account",
+          accountId: "example-account",
+        } satisfies QueueMessage),
+        deleteExpiredMcpOauthSessions(env),
+      ]);
       break;
 
     default:
