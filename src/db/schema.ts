@@ -1,4 +1,4 @@
-import { sqliteTable, integer, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, sqliteTable, integer, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
 // better-auth tables
@@ -149,3 +149,58 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+export const mcpServer = sqliteTable(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    serverUrl: text("server_url").notNull(),
+    status: text("status").notNull(),
+    oauthIssuer: text("oauth_issuer"),
+    authorizationEndpoint: text("authorization_endpoint"),
+    tokenEndpoint: text("token_endpoint"),
+    tokenAuthMethod: text("token_auth_method"),
+    scopes: text("scopes"),
+    encryptedAuthData: text("encrypted_auth_data"),
+    lastTestStatus: text("last_test_status"),
+    lastError: text("last_error"),
+    lastTestAt: integer("last_test_at", { mode: "timestamp" }),
+    connectedAt: integer("connected_at", { mode: "timestamp" }),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [
+    uniqueIndex("mcp_server_user_server_url_unique").on(table.userId, table.serverUrl),
+    index("mcp_server_user_status_idx").on(table.userId, table.status),
+  ],
+);
+
+export const mcpOAuthState = sqliteTable(
+  "mcp_oauth_state",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    serverId: text("server_id").references(() => mcpServer.id, { onDelete: "cascade" }),
+    serverName: text("server_name").notNull(),
+    serverUrl: text("server_url").notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    scopes: text("scopes"),
+    oauthMetadata: text("oauth_metadata").notNull(),
+    encryptedCodeVerifier: text("encrypted_code_verifier").notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [index("mcp_oauth_state_user_expires_idx").on(table.userId, table.expiresAt)],
+);
