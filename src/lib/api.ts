@@ -1,6 +1,11 @@
 import { env } from "cloudflare:workers";
 
-import { ApiError } from "#/lib/api-error";
+import {
+  getValidatedRequestOrigin,
+  handleApiError,
+  parseJsonBody,
+  requireAuthenticatedSession,
+} from "#/lib/api-guards";
 import { getAuth } from "#/lib/auth";
 
 interface ApiHandlerOptions {
@@ -14,6 +19,7 @@ interface ApiHandlerOptions {
 interface ApiHandlerContext<TEnv extends Cloudflare.Env> {
   env: TEnv;
   origin: string;
+  params: Record<string, string>;
   request: Request;
 }
 
@@ -25,42 +31,27 @@ interface AuthenticatedApiHandlerContext<
   };
 }
 
-type RouteHandler = (context: { request: Request }) => Promise<Response>;
+type RouteHandler = (context: {
+  params?: Record<string, string>;
+  request: Request;
+}) => Promise<Response>;
 
-function getOrigin(request: Request, requireSameOrigin: boolean) {
-  const requestOrigin = new URL(request.url).origin;
-  if (!requireSameOrigin) return requestOrigin;
-
-  const origin = request.headers.get("origin");
-  if (!origin || origin !== requestOrigin) {
-    throw new ApiError(403, "Invalid origin");
-  }
-  return origin;
-}
-
-export function handleApiError(error: unknown, fallback?: ApiHandlerOptions["fallbackError"]) {
-  if (error instanceof Response) return error;
-
-  if (error instanceof ApiError) {
-    return Response.json({ error: error.message, ...error.details }, { status: error.status });
-  }
-
-  console.error(error);
-  return Response.json(
-    { error: fallback?.message ?? "Unable to complete request" },
-    { status: fallback?.status ?? 500 },
-  );
-}
+export { handleApiError, parseJsonBody };
 
 export function publicApiHandler<TEnv extends Cloudflare.Env>(
   handler: (context: ApiHandlerContext<TEnv>) => Response | Promise<Response>,
   options: ApiHandlerOptions = {},
 ): RouteHandler {
-  return async ({ request }) => {
+  return async ({ params, request }) => {
     try {
       return await handler({
         env: env as TEnv,
-        origin: getOrigin(request, options.sameOrigin ?? false),
+        origin: getValidatedRequestOrigin(
+          request.url,
+          request.headers.get("origin"),
+          options.sameOrigin ?? false,
+        ),
+        params: params ?? {},
         request,
       });
     } catch (error) {
@@ -74,10 +65,9 @@ export function authenticatedApiHandler<TEnv extends Cloudflare.Env>(
   options: ApiHandlerOptions = {},
 ): RouteHandler {
   return publicApiHandler<TEnv>(async (context) => {
-    const session = await getAuth(context.env).api.getSession({ headers: context.request.headers });
-    if (!session) {
-      throw new ApiError(401, "Unauthorized");
-    }
+    const session = requireAuthenticatedSession(
+      await getAuth(context.env).api.getSession({ headers: context.request.headers }),
+    );
 
     return handler({ ...context, user: session.user });
   }, options);

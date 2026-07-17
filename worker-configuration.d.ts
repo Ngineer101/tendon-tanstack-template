@@ -8,6 +8,9 @@ interface __BaseEnv_Env {
   AI: Ai;
   BETTER_AUTH_URL: string;
   BETTER_AUTH_SECRET: string;
+  MCP_AUTH_ENCRYPTION_KEY: string;
+  MCP_OAUTH_CLIENT_ID?: string;
+  MCP_OAUTH_CLIENT_SECRET?: string;
   EXAMPLE_WORKFLOW: Workflow<
     Parameters<import("./src/worker").ExampleWorkflow["run"]>[0]["payload"]
   >;
@@ -24,7 +27,14 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 };
 declare namespace NodeJS {
   interface ProcessEnv extends StringifyValues<
-    Pick<Cloudflare.Env, "BETTER_AUTH_URL" | "BETTER_AUTH_SECRET">
+    Pick<
+      Cloudflare.Env,
+      | "BETTER_AUTH_URL"
+      | "BETTER_AUTH_SECRET"
+      | "MCP_AUTH_ENCRYPTION_KEY"
+      | "MCP_OAUTH_CLIENT_ID"
+      | "MCP_OAUTH_CLIENT_SECRET"
+    >
   > {}
 }
 
