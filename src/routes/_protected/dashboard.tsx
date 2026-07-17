@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   AlertTriangle,
@@ -97,25 +97,33 @@ function Dashboard() {
   const [summary, setSummary] = useState<McpDashboardSummary>();
   const [dialog, setDialog] = useState<DialogState>();
   const [pageError, setPageError] = useState<string>();
+  const [pageSuccess, setPageSuccess] = useState<string>();
   const [pendingAction, setPendingAction] = useState<string>();
+  const [disconnectTarget, setDisconnectTarget] = useState<McpServerSummary>();
 
-  async function loadMcpServers() {
+  const loadMcpServers = useCallback(async () => {
     const response = await fetch("/api/mcp/servers");
     if (!response.ok) throw new Error("Unable to load MCP servers");
     setSummary((await response.json()) as McpDashboardSummary);
-  }
+  }, []);
 
   useEffect(() => {
     void loadMcpServers().catch((reason: unknown) => {
       setPageError(reason instanceof Error ? reason.message : "Unable to load MCP servers");
     });
-  }, []);
+  }, [loadMcpServers]);
 
   async function runServerAction(
     server: McpServerSummary,
     action: "test" | "disconnect" | "reconnect",
+    confirmed = false,
   ) {
+    if (action === "disconnect" && !confirmed) {
+      setDisconnectTarget(server);
+      return;
+    }
     setPageError(undefined);
+    setPageSuccess(undefined);
     setPendingAction(`${action}:${server.id}`);
     try {
       if (action === "reconnect") {
@@ -135,8 +143,14 @@ function Dashboard() {
 
       await postJson(`/api/mcp/servers/${action}`, { id: server.id });
       await loadMcpServers();
+      setPageSuccess(
+        action === "test"
+          ? `${server.name} completed an MCP protocol handshake successfully.`
+          : `${server.name} was disconnected and its stored credentials were removed.`,
+      );
     } catch (reason) {
       setPageError(reason instanceof Error ? reason.message : `Unable to ${action} MCP server`);
+      void loadMcpServers().catch(() => undefined);
     } finally {
       setPendingAction(undefined);
     }
@@ -176,6 +190,7 @@ function Dashboard() {
           {search.message ?? "Unable to complete MCP authorization."}
         </Feedback>
       )}
+      {pageSuccess && <Feedback tone="success">{pageSuccess}</Feedback>}
       {pageError && <Feedback tone="error">{pageError}</Feedback>}
 
       <div className="mt-8 grid gap-4 md:grid-cols-3">
@@ -267,6 +282,37 @@ function Dashboard() {
         onClose={() => setDialog(undefined)}
         onSaved={loadMcpServers}
       />
+      <Dialog
+        open={!!disconnectTarget}
+        onOpenChange={(open) => !open && setDisconnectTarget(undefined)}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Disconnect {disconnectTarget?.name}?</DialogTitle>
+            <DialogDescription>
+              Its encrypted OAuth credentials will be removed. The server remains in your grid so
+              you can reconnect it later.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDisconnectTarget(undefined)}>
+              Keep connected
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (!disconnectTarget) return;
+                const server = disconnectTarget;
+                setDisconnectTarget(undefined);
+                void runServerAction(server, "disconnect", true);
+              }}
+            >
+              <Unplug className="size-4" />
+              Disconnect
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -274,6 +320,8 @@ function Dashboard() {
 function Feedback({ children, tone }: { children: React.ReactNode; tone: "success" | "error" }) {
   return (
     <p
+      role={tone === "error" ? "alert" : "status"}
+      aria-live="polite"
       className={
         tone === "success"
           ? "mt-6 border border-primary/30 bg-primary/10 px-4 py-3 text-sm"
@@ -319,7 +367,7 @@ function McpServerCard({
   const isPending = (action: string) => pendingAction === `${action}:${server.id}`;
 
   return (
-    <Card className="group/card min-h-64 transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/50 hover:shadow-sm">
+    <Card className="group/card min-h-64 transition-all duration-200 motion-safe:hover:-translate-y-0.5 hover:border-primary/50 hover:shadow-sm">
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -328,7 +376,17 @@ function McpServerCard({
               {new URL(server.serverUrl).host}
             </CardDescription>
           </div>
-          <Badge className={status.tone}>{status.label}</Badge>
+          <Badge className={status.tone}>
+            <span
+              aria-hidden="true"
+              className={
+                server.status === "connected"
+                  ? "size-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none"
+                  : "size-1.5 rounded-full bg-current"
+              }
+            />
+            {status.label}
+          </Badge>
         </div>
       </CardHeader>
       <CardContent>
@@ -387,7 +445,7 @@ function McpServerCard({
             {isPending("reconnect") ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
-              <RefreshCcw className="size-4 transition-transform group-hover/card:rotate-45" />
+              <RefreshCcw className="size-4 transition-transform motion-safe:group-hover/card:rotate-45" />
             )}
             Reconnect
           </Button>
@@ -447,7 +505,11 @@ function McpServerDialog({
     setError(undefined);
     setPending("discover");
     try {
-      setDiscovery(await postJson<DiscoveryPreview>("/api/mcp/discover", { serverUrl }));
+      const preview = await postJson<DiscoveryPreview>("/api/mcp/discover", { serverUrl });
+      setDiscovery(preview);
+      if (!scopes.trim() && preview.scopesSupported.length > 0) {
+        setScopes(preview.scopesSupported.join(" "));
+      }
     } catch (reason) {
       setDiscovery(undefined);
       setError(reason instanceof Error ? reason.message : "Unable to discover OAuth metadata");
@@ -499,13 +561,49 @@ function McpServerDialog({
           </DialogDescription>
         </DialogHeader>
 
+        <ol className="grid grid-cols-3 border" aria-label="Connection progress">
+          {[
+            { label: "Configure", complete: canSubmit },
+            { label: "Discover", complete: !!discovery },
+            { label: "Authenticate", complete: false },
+          ].map((step, index) => (
+            <li
+              key={step.label}
+              className={
+                index === 2
+                  ? "flex items-center gap-2 px-3 py-2 text-xs"
+                  : "flex items-center gap-2 border-r px-3 py-2 text-xs"
+              }
+            >
+              <span
+                className={
+                  step.complete
+                    ? "grid size-5 place-items-center rounded-full bg-primary text-[10px] text-primary-foreground transition-colors"
+                    : "grid size-5 place-items-center rounded-full border text-[10px] text-muted-foreground transition-colors"
+                }
+              >
+                {step.complete ? <CheckCircle2 className="size-3" /> : index + 1}
+              </span>
+              <span className={step.complete ? "font-medium" : "text-muted-foreground"}>
+                {step.label}
+              </span>
+            </li>
+          ))}
+        </ol>
+
         {limitReached && (
-          <p className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p
+            role="alert"
+            className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
             Free accounts can connect 3 MCP servers. Disconnect one or upgrade to Pro.
           </p>
         )}
         {error && (
-          <p className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p
+            role="alert"
+            className="animate-in fade-in-0 slide-in-from-top-1 border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive motion-reduce:animate-none"
+          >
             {error}
           </p>
         )}
@@ -515,6 +613,7 @@ function McpServerDialog({
             <Label htmlFor="mcp-name">Name</Label>
             <Input
               id="mcp-name"
+              autoComplete="off"
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder="Workspace tools"
@@ -524,6 +623,10 @@ function McpServerDialog({
             <Label htmlFor="mcp-url">Server URL</Label>
             <Input
               id="mcp-url"
+              type="url"
+              inputMode="url"
+              autoComplete="url"
+              spellCheck={false}
               value={serverUrl}
               onChange={(event) => {
                 setServerUrl(event.target.value);
@@ -536,6 +639,8 @@ function McpServerDialog({
             <Label htmlFor="mcp-scopes">OAuth scopes</Label>
             <Input
               id="mcp-scopes"
+              autoComplete="off"
+              spellCheck={false}
               value={scopes}
               onChange={(event) => setScopes(event.target.value)}
               placeholder="mcp:tools"
@@ -544,7 +649,7 @@ function McpServerDialog({
         </div>
 
         {discovery && (
-          <div className="animate-in fade-in-0 zoom-in-95 border bg-muted/40 p-3 text-sm duration-150">
+          <div className="animate-in fade-in-0 zoom-in-95 border bg-muted/40 p-3 text-sm duration-150 motion-reduce:animate-none">
             <p className="flex items-center gap-2 font-medium">
               <CheckCircle2 className="size-4 text-primary" />
               OAuth discovery verified
@@ -594,7 +699,7 @@ function McpServerDialog({
           </Button>
           <Button
             onClick={() => void authenticate()}
-            disabled={!canSubmit || limitReached || !!pending}
+            disabled={!canSubmit || !discovery || limitReached || !!pending}
           >
             {pending === "auth" ? (
               <Loader2 className="size-4 animate-spin" />
@@ -604,6 +709,11 @@ function McpServerDialog({
             Authenticate
           </Button>
         </DialogFooter>
+        {!discovery && (
+          <p className="text-right text-xs text-muted-foreground">
+            Verify OAuth discovery before authentication.
+          </p>
+        )}
       </DialogContent>
     </Dialog>
   );

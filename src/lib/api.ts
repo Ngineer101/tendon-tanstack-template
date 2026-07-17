@@ -1,14 +1,11 @@
 import { env } from "cloudflare:workers";
 
-import { ApiError } from "#/lib/api-error";
+import { ApiError, handleApiError, type ApiErrorFallback } from "#/lib/api-error";
 import { getAuth } from "#/lib/auth";
 
 interface ApiHandlerOptions {
   sameOrigin?: boolean;
-  fallbackError?: {
-    status: number;
-    message: string;
-  };
+  fallbackError?: ApiErrorFallback;
 }
 
 interface ApiHandlerContext<TEnv extends Cloudflare.Env> {
@@ -36,20 +33,6 @@ function getOrigin(request: Request, requireSameOrigin: boolean) {
     throw new ApiError(403, "Invalid origin");
   }
   return origin;
-}
-
-export function handleApiError(error: unknown, fallback?: ApiHandlerOptions["fallbackError"]) {
-  if (error instanceof Response) return error;
-
-  if (error instanceof ApiError) {
-    return Response.json({ error: error.message, ...error.details }, { status: error.status });
-  }
-
-  console.error(error);
-  return Response.json(
-    { error: fallback?.message ?? "Unable to complete request" },
-    { status: fallback?.status ?? 500 },
-  );
 }
 
 export function publicApiHandler<TEnv extends Cloudflare.Env>(

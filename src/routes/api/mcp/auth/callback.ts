@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { getAuth } from "#/lib/auth";
 import { ApiError } from "#/lib/api-error";
-import { completeMcpAuthorization, type McpEnv } from "#/lib/mcp/core.server";
+import { completeMcpAuthorization, failMcpAuthorization, type McpEnv } from "#/lib/mcp/core.server";
 import { env } from "cloudflare:workers";
 
 function dashboardRedirect(request: Request, status: "connected" | "error", message?: string) {
@@ -28,12 +28,16 @@ export const Route = createFileRoute("/api/mcp/auth/callback")({
 
         const error = url.searchParams.get("error");
         if (error) {
+          const state = url.searchParams.get("state");
+          if (state && state.length <= 128) {
+            await failMcpAuthorization(env as McpEnv, session.user.id, state);
+          }
           return dashboardRedirect(request, "error", "The MCP server declined authorization.");
         }
 
         const state = url.searchParams.get("state");
         const code = url.searchParams.get("code");
-        if (!state || !code) {
+        if (!state || !code || state.length > 128 || code.length > 8_192) {
           return dashboardRedirect(
             request,
             "error",

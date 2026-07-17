@@ -1,18 +1,42 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 
 import { getDb } from "#/db";
 import { mcpOAuthState, mcpServer } from "#/db/schema";
 import { ApiError } from "#/lib/api-error";
 import { getBillingSummary, hasEntitlement } from "#/lib/billing/core.server";
 import type { BillingEnv } from "#/lib/billing/config.server";
+import {
+  buildAuthorizationUrl,
+  createPkcePair,
+  discoverOAuthMetadata,
+  selectOAuthScopes,
+  selectTokenAuthMethod,
+  type OAuthMetadata,
+} from "./oauth.server";
+import {
+  decryptJson,
+  encryptJson,
+  MCP_PROTOCOL_VERSION,
+  normalizeMcpServerUrl,
+  readBoundedJson,
+  readBoundedText,
+  safeOutboundFetch,
+  type OutboundRequestOptions,
+} from "./security.server";
+
+export {
+  buildAuthorizationUrl,
+  createPkcePair,
+  decryptJson,
+  discoverOAuthMetadata,
+  encryptJson,
+  normalizeMcpServerUrl,
+};
+export type { OAuthMetadata };
 
 const FREE_MCP_SERVER_LIMIT = 3;
 const ACTIVE_MCP_STATUSES = ["connected", "pending_auth", "needs_reconnect", "error"] as const;
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
-const DISCOVERY_PATHS = [
-  "/.well-known/oauth-authorization-server",
-  "/.well-known/openid-configuration",
-];
 
 export interface McpEnv extends BillingEnv {
   MCP_AUTH_ENCRYPTION_KEY: string;
@@ -27,265 +51,24 @@ export type McpServerStatus =
   | "error"
   | "disconnected";
 
-export interface OAuthMetadata {
-  issuer?: string;
-  authorization_endpoint: string;
-  token_endpoint: string;
-  scopes_supported?: string[];
-}
-
 interface McpTokenData {
   access_token?: string;
   refresh_token?: string;
   token_type?: string;
   expires_in?: number;
   scope?: string;
+  obtained_at?: number;
   [key: string]: unknown;
-}
-
-interface FetchLike {
-  (input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 }
 
 function createId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string) {
-  const binary = atob(value);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
-}
-
-function base64UrlEncode(bytes: Uint8Array) {
-  return bytesToBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-}
-
-function timingSafeStringEqual(left: string, right: string) {
-  if (left.length !== right.length) return false;
-
-  let difference = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
-  }
-  return difference === 0;
-}
-
-function parseEncryptionKey(secret: string) {
-  const trimmed = secret.trim();
-  if (!trimmed) {
-    throw new ApiError(500, "MCP encryption is not configured");
-  }
-
-  try {
-    const decoded = base64ToBytes(trimmed);
-    if (decoded.byteLength >= 32) return decoded.slice(0, 32);
-  } catch {
-    // Treat non-base64 values as raw secrets below.
-  }
-
-  const raw = new TextEncoder().encode(trimmed);
-  if (raw.byteLength < 32) {
-    throw new ApiError(500, "MCP encryption key must be at least 32 bytes");
-  }
-  return raw.slice(0, 32);
-}
-
-async function importEncryptionKey(secret: string) {
-  return crypto.subtle.importKey("raw", parseEncryptionKey(secret), "AES-GCM", false, [
-    "encrypt",
-    "decrypt",
-  ]);
-}
-
-export async function encryptJson(value: unknown, secret: string) {
-  const key = await importEncryptionKey(secret);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify(value));
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
-
-  return JSON.stringify({
-    v: 1,
-    alg: "AES-GCM",
-    iv: bytesToBase64(iv),
-    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
-  });
-}
-
-export async function decryptJson<T>(encrypted: string, secret: string) {
-  const envelope = JSON.parse(encrypted) as { v: number; iv: string; ciphertext: string };
-  if (envelope.v !== 1) {
-    throw new ApiError(500, "Unsupported MCP encryption envelope");
-  }
-
-  const key = await importEncryptionKey(secret);
-  const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: base64ToBytes(envelope.iv) },
-    key,
-    base64ToBytes(envelope.ciphertext),
-  );
-  return JSON.parse(new TextDecoder().decode(plaintext)) as T;
-}
-
-function isPrivateIpv4(hostname: string) {
-  const parts = hostname.split(".").map((part) => Number(part));
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return false;
-  }
-
-  const [a, b] = parts;
-  if (a === 10 || a === 127 || a === 0) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 169 && b === 254) return true;
-  if (a >= 224) return true;
-  return false;
-}
-
-export function normalizeMcpServerUrl(value: string) {
-  let parsed: URL;
-  try {
-    parsed = new URL(value.trim());
-  } catch {
-    throw new ApiError(400, "Enter a valid MCP server URL");
-  }
-
-  if (parsed.protocol !== "https:") {
-    throw new ApiError(400, "MCP server URLs must use HTTPS");
-  }
-  if (parsed.username || parsed.password) {
-    throw new ApiError(400, "MCP server URLs cannot include credentials");
-  }
-
-  const hostname = parsed.hostname.toLowerCase();
-  if (
-    hostname === "localhost" ||
-    hostname.endsWith(".localhost") ||
-    hostname.endsWith(".local") ||
-    hostname.endsWith(".internal") ||
-    hostname === "metadata.google.internal" ||
-    hostname === "169.254.169.254" ||
-    hostname.includes(":") ||
-    isPrivateIpv4(hostname)
-  ) {
-    throw new ApiError(400, "MCP server URL points to a restricted host");
-  }
-
-  parsed.hash = "";
-  parsed.username = "";
-  parsed.password = "";
-  if (parsed.pathname === "") parsed.pathname = "/";
-  return parsed.toString();
-}
-
-function validateEndpoint(value: unknown, label: string) {
-  if (typeof value !== "string") {
-    throw new ApiError(502, `OAuth discovery did not include ${label}`);
-  }
-  return normalizeMcpServerUrl(value);
-}
-
-function validateOAuthMetadata(value: unknown): OAuthMetadata {
-  if (!value || typeof value !== "object") {
-    throw new ApiError(502, "OAuth discovery returned an invalid response");
-  }
-
-  const body = value as Record<string, unknown>;
-  const authorizationEndpoint = validateEndpoint(
-    body.authorization_endpoint,
-    "an authorization endpoint",
-  );
-  const tokenEndpoint = validateEndpoint(body.token_endpoint, "a token endpoint");
-  const scopes =
-    Array.isArray(body.scopes_supported) &&
-    body.scopes_supported.every((scope) => typeof scope === "string")
-      ? body.scopes_supported
-      : undefined;
-
-  return {
-    issuer: typeof body.issuer === "string" ? body.issuer : undefined,
-    authorization_endpoint: authorizationEndpoint,
-    token_endpoint: tokenEndpoint,
-    scopes_supported: scopes,
-  };
-}
-
-async function fetchJsonWithoutRedirects(fetcher: FetchLike, url: string, init?: RequestInit) {
-  const headers = new Headers(init?.headers);
-  headers.set("accept", headers.get("accept") ?? "application/json");
-
-  const response = await fetcher(url, {
-    ...init,
-    redirect: "manual",
-    headers,
-  });
-
-  if (response.status >= 300 && response.status < 400) {
-    throw new ApiError(502, "OAuth discovery redirects are not allowed");
-  }
-  if (!response.ok) {
-    throw new ApiError(502, "OAuth discovery failed", { status: response.status });
-  }
-  return response.json() as Promise<unknown>;
-}
-
-export async function discoverOAuthMetadata(serverUrl: string, fetcher: FetchLike = fetch) {
-  const normalizedServerUrl = normalizeMcpServerUrl(serverUrl);
-  const server = new URL(normalizedServerUrl);
-  const errors: string[] = [];
-
-  for (const path of DISCOVERY_PATHS) {
-    const discoveryUrl = new URL(path, server.origin);
-    try {
-      const metadata = validateOAuthMetadata(
-        await fetchJsonWithoutRedirects(fetcher, discoveryUrl.toString()),
-      );
-      return { serverUrl: normalizedServerUrl, metadata };
-    } catch (error) {
-      errors.push(error instanceof Error ? error.message : "Discovery failed");
-    }
-  }
-
-  throw new ApiError(502, "Unable to discover OAuth metadata for this MCP server", {
-    attempts: errors.length,
-  });
-}
-
-export async function createPkcePair() {
-  const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
-  const verifier = base64UrlEncode(verifierBytes);
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-  return {
-    verifier,
-    challenge: base64UrlEncode(new Uint8Array(digest)),
-  };
-}
-
-export function buildAuthorizationUrl(options: {
-  metadata: OAuthMetadata;
-  clientId: string;
-  redirectUri: string;
-  state: string;
-  codeChallenge: string;
-  scopes?: string;
-}) {
-  const authorizationUrl = new URL(options.metadata.authorization_endpoint);
-  authorizationUrl.searchParams.set("response_type", "code");
-  authorizationUrl.searchParams.set("client_id", options.clientId);
-  authorizationUrl.searchParams.set("redirect_uri", options.redirectUri);
-  authorizationUrl.searchParams.set("state", options.state);
-  authorizationUrl.searchParams.set("code_challenge", options.codeChallenge);
-  authorizationUrl.searchParams.set("code_challenge_method", "S256");
-  if (options.scopes) authorizationUrl.searchParams.set("scope", options.scopes);
-  return authorizationUrl.toString();
+function encodeBasicClientCredentials(clientId: string, clientSecret: string) {
+  const encode = (value: string) =>
+    new URLSearchParams({ value }).toString().slice("value=".length);
+  return `Basic ${btoa(`${encode(clientId)}:${encode(clientSecret)}`)}`;
 }
 
 export function assertCanCreateMcpServer(options: {
@@ -303,7 +86,7 @@ export function assertMcpServerOwner<T extends { userId: string }>(
   server: T | undefined,
   userId: string,
 ): asserts server is T {
-  if (!server || !timingSafeStringEqual(server.userId, userId)) {
+  if (!server || server.userId !== userId) {
     throw new ApiError(404, "MCP server not found");
   }
 }
@@ -352,8 +135,11 @@ export async function getMcpDashboard(env: McpEnv, userId: string) {
   };
 }
 
-export async function previewMcpDiscovery(serverUrl: string, fetcher?: FetchLike) {
-  const discovery = await discoverOAuthMetadata(serverUrl, fetcher);
+export async function previewMcpDiscovery(
+  serverUrl: string,
+  dependencies: OutboundRequestOptions = {},
+) {
+  const discovery = await discoverOAuthMetadata(serverUrl, dependencies);
   return {
     serverUrl: discovery.serverUrl,
     issuer: discovery.metadata.issuer,
@@ -363,12 +149,113 @@ export async function previewMcpDiscovery(serverUrl: string, fetcher?: FetchLike
   };
 }
 
-async function getActiveServerCount(env: McpEnv, userId: string) {
-  const result = await getDb(env.DB)
-    .select({ count: sql<number>`count(*)` })
-    .from(mcpServer)
-    .where(and(eq(mcpServer.userId, userId), inArray(mcpServer.status, [...ACTIVE_MCP_STATUSES])));
-  return Number(result[0]?.count ?? 0);
+async function reservePendingServer(
+  env: McpEnv,
+  userId: string,
+  input: {
+    existingServer?: typeof mcpServer.$inferSelect;
+    name: string;
+    serverUrl: string;
+    scopes?: string;
+    tokenAuthMethod: string;
+    metadata: OAuthMetadata;
+  },
+) {
+  const unlimited = await hasEntitlement(env, userId, "unlimited_mcp_servers");
+  const now = Math.floor(Date.now() / 1_000);
+  const serverId = input.existingServer?.id ?? createId("mcp");
+  const activeStatuses = [...ACTIVE_MCP_STATUSES];
+  const statusPlaceholders = activeStatuses.map(() => "?").join(", ");
+
+  try {
+    const statement = input.existingServer
+      ? env.DB.prepare(
+          `UPDATE mcp_server
+             SET name = ?, server_url = ?, status = 'pending_auth', oauth_issuer = ?,
+                 authorization_endpoint = ?, token_endpoint = ?, token_auth_method = ?, scopes = ?,
+                 last_error = NULL,
+                 updated_at = ?
+           WHERE id = ? AND user_id = ?
+             AND (status != 'disconnected' OR ? = 1 OR
+                  (SELECT COUNT(*) FROM mcp_server
+                   WHERE user_id = ? AND status IN (${statusPlaceholders})) < ?)`,
+        ).bind(
+          input.name,
+          input.serverUrl,
+          input.metadata.issuer,
+          input.metadata.authorization_endpoint,
+          input.metadata.token_endpoint,
+          input.tokenAuthMethod,
+          input.scopes ?? null,
+          now,
+          serverId,
+          userId,
+          unlimited ? 1 : 0,
+          userId,
+          ...activeStatuses,
+          FREE_MCP_SERVER_LIMIT,
+        )
+      : env.DB.prepare(
+          `INSERT INTO mcp_server
+             (id, user_id, name, server_url, status, oauth_issuer, authorization_endpoint,
+              token_endpoint, token_auth_method, scopes, last_error, created_at, updated_at)
+           SELECT ?, ?, ?, ?, 'pending_auth', ?, ?, ?, ?, ?, NULL, ?, ?
+           WHERE ? = 1
+              OR EXISTS (SELECT 1 FROM mcp_server
+                         WHERE user_id = ? AND server_url = ?
+                           AND status IN (${statusPlaceholders}))
+              OR (SELECT COUNT(*) FROM mcp_server
+                  WHERE user_id = ? AND status IN (${statusPlaceholders})) < ?
+           ON CONFLICT(user_id, server_url) DO UPDATE SET
+             name = excluded.name,
+             status = 'pending_auth',
+             oauth_issuer = excluded.oauth_issuer,
+             authorization_endpoint = excluded.authorization_endpoint,
+             token_endpoint = excluded.token_endpoint,
+             token_auth_method = excluded.token_auth_method,
+             scopes = excluded.scopes,
+             last_error = NULL,
+             updated_at = excluded.updated_at`,
+        ).bind(
+          serverId,
+          userId,
+          input.name,
+          input.serverUrl,
+          input.metadata.issuer,
+          input.metadata.authorization_endpoint,
+          input.metadata.token_endpoint,
+          input.tokenAuthMethod,
+          input.scopes ?? null,
+          now,
+          now,
+          unlimited ? 1 : 0,
+          userId,
+          input.serverUrl,
+          ...activeStatuses,
+          userId,
+          ...activeStatuses,
+          FREE_MCP_SERVER_LIMIT,
+        );
+
+    const result = await statement.run();
+    if (result.meta.changes === 0) {
+      throw new ApiError(403, "Free plans can connect up to 3 MCP servers", {
+        limit: FREE_MCP_SERVER_LIMIT,
+      });
+    }
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (error instanceof Error && /unique|constraint/i.test(error.message)) {
+      throw new ApiError(409, "This MCP server URL is already configured");
+    }
+    throw error;
+  }
+
+  const pendingServer = await getDb(env.DB).query.mcpServer.findFirst({
+    where: and(eq(mcpServer.userId, userId), eq(mcpServer.serverUrl, input.serverUrl)),
+  });
+  if (!pendingServer) throw new ApiError(500, "Unable to prepare MCP server connection");
+  return pendingServer;
 }
 
 export async function startMcpAuthorization(
@@ -381,7 +268,7 @@ export async function startMcpAuthorization(
     serverId?: string;
     origin: string;
   },
-  fetcher?: FetchLike,
+  dependencies: OutboundRequestOptions = {},
 ) {
   if (!env.MCP_OAUTH_CLIENT_ID) {
     throw new ApiError(500, "MCP OAuth client ID is not configured");
@@ -399,60 +286,31 @@ export async function startMcpAuthorization(
       where: eq(mcpServer.id, input.serverId),
     });
     assertMcpServerOwner(existingServer, userId);
-  } else {
-    const unlimited = await hasEntitlement(env, userId, "unlimited_mcp_servers");
-    assertCanCreateMcpServer({
-      activeServerCount: await getActiveServerCount(env, userId),
-      hasUnlimitedServers: unlimited,
-    });
   }
 
-  const { serverUrl, metadata } = await discoverOAuthMetadata(input.serverUrl, fetcher);
+  const { serverUrl, metadata } = await discoverOAuthMetadata(input.serverUrl, dependencies);
   const redirectUri = new URL("/api/mcp/auth/callback", input.origin).toString();
   const state = createId("mcpstate");
   const pkce = await createPkcePair();
+  const scopes = selectOAuthScopes(metadata, input.scopes);
+  const tokenAuthMethod = selectTokenAuthMethod(metadata, !!env.MCP_OAUTH_CLIENT_SECRET);
   const encryptedCodeVerifier = await encryptJson(
     { verifier: pkce.verifier },
     env.MCP_AUTH_ENCRYPTION_KEY,
+    `mcp-oauth-state:${state}`,
   );
-  const serverId = existingServer?.id ?? createId("mcp");
+  const pendingServer = await reservePendingServer(env, userId, {
+    existingServer,
+    name,
+    serverUrl,
+    scopes,
+    tokenAuthMethod,
+    metadata,
+  });
 
   await db
-    .insert(mcpServer)
-    .values({
-      id: serverId,
-      userId,
-      name,
-      serverUrl,
-      status: "pending_auth",
-      oauthIssuer: metadata.issuer,
-      authorizationEndpoint: metadata.authorization_endpoint,
-      tokenEndpoint: metadata.token_endpoint,
-      scopes: input.scopes?.trim() || null,
-      lastError: null,
-      updatedAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [mcpServer.userId, mcpServer.serverUrl],
-      set: {
-        name,
-        status: "pending_auth",
-        oauthIssuer: metadata.issuer,
-        authorizationEndpoint: metadata.authorization_endpoint,
-        tokenEndpoint: metadata.token_endpoint,
-        scopes: input.scopes?.trim() || null,
-        lastError: null,
-        updatedAt: new Date(),
-      },
-    });
-
-  const pendingServer = await db.query.mcpServer.findFirst({
-    where: and(eq(mcpServer.userId, userId), eq(mcpServer.serverUrl, serverUrl)),
-  });
-  if (!pendingServer) {
-    throw new ApiError(500, "Unable to prepare MCP server connection");
-  }
-
+    .delete(mcpOAuthState)
+    .where(and(eq(mcpOAuthState.userId, userId), eq(mcpOAuthState.serverId, pendingServer.id)));
   await db.insert(mcpOAuthState).values({
     id: state,
     userId,
@@ -460,7 +318,7 @@ export async function startMcpAuthorization(
     serverName: name,
     serverUrl,
     redirectUri,
-    scopes: input.scopes?.trim() || null,
+    scopes: scopes ?? null,
     oauthMetadata: JSON.stringify(metadata),
     encryptedCodeVerifier,
     expiresAt: new Date(Date.now() + OAUTH_STATE_TTL_MS),
@@ -473,7 +331,7 @@ export async function startMcpAuthorization(
       redirectUri,
       state,
       codeChallenge: pkce.challenge,
-      scopes: input.scopes?.trim(),
+      scopes,
     }),
     server: serializeServer(pendingServer),
   };
@@ -487,7 +345,7 @@ async function exchangeAuthorizationCode(
     redirectUri: string;
     codeVerifier: string;
   },
-  fetcher: FetchLike = fetch,
+  dependencies: OutboundRequestOptions = {},
 ) {
   const form = new URLSearchParams({
     grant_type: "authorization_code",
@@ -495,6 +353,7 @@ async function exchangeAuthorizationCode(
     redirect_uri: request.redirectUri,
     client_id: env.MCP_OAUTH_CLIENT_ID ?? "",
     code_verifier: request.codeVerifier,
+    resource: metadata.resource,
   });
 
   const headers: Record<string, string> = {
@@ -502,31 +361,50 @@ async function exchangeAuthorizationCode(
     accept: "application/json",
   };
 
-  if (env.MCP_OAUTH_CLIENT_SECRET) {
-    headers.authorization = `Basic ${btoa(
-      `${env.MCP_OAUTH_CLIENT_ID ?? ""}:${env.MCP_OAUTH_CLIENT_SECRET}`,
-    )}`;
+  const tokenAuthMethod = selectTokenAuthMethod(metadata, !!env.MCP_OAUTH_CLIENT_SECRET);
+  if (tokenAuthMethod === "client_secret_post") {
+    form.set("client_secret", env.MCP_OAUTH_CLIENT_SECRET ?? "");
+  } else if (tokenAuthMethod === "client_secret_basic") {
+    headers.authorization = encodeBasicClientCredentials(
+      env.MCP_OAUTH_CLIENT_ID ?? "",
+      env.MCP_OAUTH_CLIENT_SECRET ?? "",
+    );
   }
 
-  const response = await fetcher(metadata.token_endpoint, {
-    method: "POST",
-    redirect: "manual",
-    headers,
-    body: form,
-  });
+  const response = await safeOutboundFetch(
+    metadata.token_endpoint,
+    { method: "POST", headers, body: form },
+    dependencies,
+  );
 
   if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
     throw new ApiError(502, "OAuth token exchange redirects are not allowed");
   }
   if (!response.ok) {
+    await response.body?.cancel();
     throw new ApiError(502, "OAuth token exchange failed", { status: response.status });
   }
 
-  const tokenData = (await response.json()) as McpTokenData;
-  if (!tokenData.access_token) {
+  const tokenData = (await readBoundedJson(response)) as McpTokenData;
+  if (typeof tokenData.access_token !== "string" || !tokenData.access_token) {
     throw new ApiError(502, "OAuth token response did not include an access token");
   }
-  return tokenData;
+  if (tokenData.token_type && tokenData.token_type.toLowerCase() !== "bearer") {
+    throw new ApiError(502, "OAuth token response used an unsupported token type");
+  }
+  return {
+    access_token: tokenData.access_token,
+    refresh_token:
+      typeof tokenData.refresh_token === "string" ? tokenData.refresh_token : undefined,
+    token_type: "Bearer",
+    expires_in:
+      typeof tokenData.expires_in === "number" && tokenData.expires_in > 0
+        ? tokenData.expires_in
+        : undefined,
+    scope: typeof tokenData.scope === "string" ? tokenData.scope : undefined,
+    obtained_at: Date.now(),
+  } satisfies McpTokenData;
 }
 
 export async function completeMcpAuthorization(
@@ -537,27 +415,27 @@ export async function completeMcpAuthorization(
     code: string;
     redirectUri: string;
   },
-  fetcher?: FetchLike,
+  dependencies: OutboundRequestOptions = {},
 ) {
   const db = getDb(env.DB);
-  const pending = await db.query.mcpOAuthState.findFirst({
-    where: eq(mcpOAuthState.id, input.state),
-  });
-  if (!pending || pending.userId !== userId) {
-    throw new ApiError(400, "MCP OAuth state is invalid or expired");
-  }
-  if (pending.expiresAt.getTime() < Date.now()) {
-    await db.delete(mcpOAuthState).where(eq(mcpOAuthState.id, pending.id));
-    throw new ApiError(400, "MCP OAuth state has expired");
-  }
-  if (pending.redirectUri !== input.redirectUri) {
-    throw new ApiError(400, "MCP OAuth redirect URI mismatch");
-  }
+  const [pending] = await db
+    .delete(mcpOAuthState)
+    .where(
+      and(
+        eq(mcpOAuthState.id, input.state),
+        eq(mcpOAuthState.userId, userId),
+        eq(mcpOAuthState.redirectUri, input.redirectUri),
+        gt(mcpOAuthState.expiresAt, new Date()),
+      ),
+    )
+    .returning();
+  if (!pending) throw new ApiError(400, "MCP OAuth state is invalid or expired");
 
   const metadata = JSON.parse(pending.oauthMetadata) as OAuthMetadata;
   const { verifier } = await decryptJson<{ verifier: string }>(
     pending.encryptedCodeVerifier,
     env.MCP_AUTH_ENCRYPTION_KEY,
+    `mcp-oauth-state:${pending.id}`,
   );
   const tokenData = await exchangeAuthorizationCode(
     env,
@@ -567,11 +445,16 @@ export async function completeMcpAuthorization(
       redirectUri: pending.redirectUri,
       codeVerifier: verifier,
     },
-    fetcher,
+    dependencies,
   );
-  const encryptedAuthData = await encryptJson(tokenData, env.MCP_AUTH_ENCRYPTION_KEY);
+  if (!pending.serverId) throw new ApiError(400, "MCP OAuth state is invalid or expired");
+  const encryptedAuthData = await encryptJson(
+    tokenData,
+    env.MCP_AUTH_ENCRYPTION_KEY,
+    `mcp-server-auth:${pending.serverId}`,
+  );
 
-  await db
+  const [connected] = await db
     .update(mcpServer)
     .set({
       status: "connected",
@@ -583,8 +466,27 @@ export async function completeMcpAuthorization(
       connectedAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(and(eq(mcpServer.id, pending.serverId ?? ""), eq(mcpServer.userId, userId)));
-  await db.delete(mcpOAuthState).where(eq(mcpOAuthState.id, pending.id));
+    .where(and(eq(mcpServer.id, pending.serverId), eq(mcpServer.userId, userId)))
+    .returning({ id: mcpServer.id });
+  if (!connected) throw new ApiError(404, "MCP server not found");
+}
+
+export async function failMcpAuthorization(env: McpEnv, userId: string, state: string) {
+  const db = getDb(env.DB);
+  const [pending] = await db
+    .delete(mcpOAuthState)
+    .where(and(eq(mcpOAuthState.id, state), eq(mcpOAuthState.userId, userId)))
+    .returning({ serverId: mcpOAuthState.serverId });
+  if (!pending?.serverId) return;
+
+  await db
+    .update(mcpServer)
+    .set({
+      status: "error",
+      lastError: "Authorization was declined or cancelled.",
+      updatedAt: new Date(),
+    })
+    .where(and(eq(mcpServer.id, pending.serverId), eq(mcpServer.userId, userId)));
 }
 
 export async function updateMcpServer(
@@ -607,19 +509,36 @@ export async function updateMcpServer(
   const serverUrl = normalizeMcpServerUrl(input.serverUrl);
   const urlChanged = server.serverUrl !== serverUrl;
 
-  await db
-    .update(mcpServer)
-    .set({
-      name,
-      serverUrl,
-      status: urlChanged ? "needs_reconnect" : server.status,
-      encryptedAuthData: urlChanged ? null : server.encryptedAuthData,
-      lastError: urlChanged
-        ? "Server URL changed. Reconnect to authenticate this endpoint."
-        : server.lastError,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(mcpServer.id, input.id), eq(mcpServer.userId, userId)));
+  try {
+    if (urlChanged) {
+      await db.batch([
+        db
+          .delete(mcpOAuthState)
+          .where(and(eq(mcpOAuthState.userId, userId), eq(mcpOAuthState.serverId, input.id))),
+        db
+          .update(mcpServer)
+          .set({
+            name,
+            serverUrl,
+            status: "needs_reconnect",
+            encryptedAuthData: null,
+            lastError: "Server URL changed. Reconnect to authenticate this endpoint.",
+            updatedAt: new Date(),
+          })
+          .where(and(eq(mcpServer.id, input.id), eq(mcpServer.userId, userId))),
+      ]);
+    } else {
+      await db
+        .update(mcpServer)
+        .set({ name, updatedAt: new Date() })
+        .where(and(eq(mcpServer.id, input.id), eq(mcpServer.userId, userId)));
+    }
+  } catch (error) {
+    if (error instanceof Error && /unique|constraint/i.test(error.message)) {
+      throw new ApiError(409, "This MCP server URL is already configured");
+    }
+    throw error;
+  }
 
   const updated = await db.query.mcpServer.findFirst({ where: eq(mcpServer.id, input.id) });
   if (!updated) throw new ApiError(404, "MCP server not found");
@@ -631,84 +550,305 @@ export async function disconnectMcpServer(env: McpEnv, userId: string, id: strin
   const server = await db.query.mcpServer.findFirst({ where: eq(mcpServer.id, id) });
   assertMcpServerOwner(server, userId);
 
-  await db
-    .update(mcpServer)
-    .set({
-      status: "disconnected",
-      encryptedAuthData: null,
-      lastTestStatus: null,
-      lastError: null,
-      connectedAt: null,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(mcpServer.id, id), eq(mcpServer.userId, userId)));
+  await db.batch([
+    db
+      .delete(mcpOAuthState)
+      .where(and(eq(mcpOAuthState.userId, userId), eq(mcpOAuthState.serverId, id))),
+    db
+      .update(mcpServer)
+      .set({
+        status: "disconnected",
+        encryptedAuthData: null,
+        lastTestStatus: null,
+        lastError: null,
+        connectedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(mcpServer.id, id), eq(mcpServer.userId, userId))),
+  ]);
 
   const updated = await db.query.mcpServer.findFirst({ where: eq(mcpServer.id, id) });
   if (!updated) throw new ApiError(404, "MCP server not found");
   return serializeServer(updated);
 }
 
+export function tokenNeedsRefresh(token: McpTokenData, now = Date.now()) {
+  if (!token.expires_in || !token.obtained_at) return false;
+  return token.obtained_at + token.expires_in * 1_000 <= now + 60_000;
+}
+
+async function refreshTokenData(
+  env: McpEnv,
+  server: typeof mcpServer.$inferSelect,
+  token: McpTokenData,
+  dependencies: OutboundRequestOptions,
+) {
+  if (!token.refresh_token || !server.tokenEndpoint) {
+    throw new ApiError(409, "Reconnect this MCP server to renew authorization");
+  }
+
+  const form = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: token.refresh_token,
+    client_id: env.MCP_OAUTH_CLIENT_ID ?? "",
+    resource: server.serverUrl,
+  });
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  if (server.tokenAuthMethod === "client_secret_post") {
+    form.set("client_secret", env.MCP_OAUTH_CLIENT_SECRET ?? "");
+  } else if (server.tokenAuthMethod === "client_secret_basic") {
+    headers.authorization = encodeBasicClientCredentials(
+      env.MCP_OAUTH_CLIENT_ID ?? "",
+      env.MCP_OAUTH_CLIENT_SECRET ?? "",
+    );
+  }
+
+  const response = await safeOutboundFetch(
+    server.tokenEndpoint,
+    { method: "POST", headers, body: form },
+    dependencies,
+  );
+  if (!response.ok || (response.status >= 300 && response.status < 400)) {
+    await response.body?.cancel();
+    throw new ApiError(409, "Reconnect this MCP server to renew authorization");
+  }
+  const refreshed = (await readBoundedJson(response)) as McpTokenData;
+  if (typeof refreshed.access_token !== "string" || !refreshed.access_token) {
+    throw new ApiError(409, "Reconnect this MCP server to renew authorization");
+  }
+  if (refreshed.token_type && refreshed.token_type.toLowerCase() !== "bearer") {
+    throw new ApiError(409, "Reconnect this MCP server to renew authorization");
+  }
+
+  return {
+    access_token: refreshed.access_token,
+    refresh_token:
+      typeof refreshed.refresh_token === "string" ? refreshed.refresh_token : token.refresh_token,
+    token_type: "Bearer",
+    expires_in:
+      typeof refreshed.expires_in === "number" && refreshed.expires_in > 0
+        ? refreshed.expires_in
+        : token.expires_in,
+    scope: typeof refreshed.scope === "string" ? refreshed.scope : token.scope,
+    obtained_at: Date.now(),
+  } satisfies McpTokenData;
+}
+
+async function getUsableTokenData(
+  env: McpEnv,
+  server: typeof mcpServer.$inferSelect,
+  dependencies: OutboundRequestOptions,
+) {
+  if (!server.encryptedAuthData || server.status !== "connected") {
+    throw new ApiError(409, "Reconnect this MCP server before using it");
+  }
+  let token = await decryptJson<McpTokenData>(
+    server.encryptedAuthData,
+    env.MCP_AUTH_ENCRYPTION_KEY,
+    `mcp-server-auth:${server.id}`,
+  );
+  if (typeof token.access_token !== "string" || !token.access_token) {
+    throw new ApiError(409, "Reconnect this MCP server before using it");
+  }
+
+  if (tokenNeedsRefresh(token)) {
+    try {
+      token = await refreshTokenData(env, server, token, dependencies);
+      await getDb(env.DB)
+        .update(mcpServer)
+        .set({
+          status: "connected",
+          encryptedAuthData: await encryptJson(
+            token,
+            env.MCP_AUTH_ENCRYPTION_KEY,
+            `mcp-server-auth:${server.id}`,
+          ),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(mcpServer.id, server.id), eq(mcpServer.userId, server.userId)));
+    } catch {
+      await getDb(env.DB)
+        .update(mcpServer)
+        .set({
+          status: "needs_reconnect",
+          lastError: "Authorization expired. Reconnect to continue using this server.",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(mcpServer.id, server.id),
+            eq(mcpServer.userId, server.userId),
+            eq(mcpServer.encryptedAuthData, server.encryptedAuthData),
+          ),
+        );
+      const latest = await getDb(env.DB).query.mcpServer.findFirst({
+        where: and(eq(mcpServer.id, server.id), eq(mcpServer.userId, server.userId)),
+      });
+      if (
+        latest?.status === "connected" &&
+        latest.encryptedAuthData &&
+        latest.encryptedAuthData !== server.encryptedAuthData
+      ) {
+        return decryptJson<McpTokenData>(
+          latest.encryptedAuthData,
+          env.MCP_AUTH_ENCRYPTION_KEY,
+          `mcp-server-auth:${server.id}`,
+        );
+      }
+      throw new ApiError(409, "Reconnect this MCP server to renew authorization");
+    }
+  }
+  return token;
+}
+
+async function parseInitializeResponse(response: Response) {
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  let payload: unknown;
+  if (contentType.includes("text/event-stream")) {
+    const text = await readBoundedText(response);
+    const data = text
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("data:") && line.slice(5).trim() !== "[DONE]")
+      ?.slice(5)
+      .trim();
+    if (!data) throw new ApiError(502, "MCP server returned an invalid initialization response");
+    try {
+      payload = JSON.parse(data) as unknown;
+    } catch {
+      throw new ApiError(502, "MCP server returned an invalid initialization response");
+    }
+  } else {
+    payload = await readBoundedJson(response);
+  }
+
+  if (!payload || typeof payload !== "object") {
+    throw new ApiError(502, "MCP server returned an invalid initialization response");
+  }
+  const body = payload as Record<string, unknown>;
+  if (body.jsonrpc !== "2.0" || body.id !== "connection-test" || !body.result) {
+    throw new ApiError(502, "MCP server did not complete protocol initialization");
+  }
+}
+
 export async function testMcpServerConnection(
   env: McpEnv,
   userId: string,
   id: string,
-  fetcher: FetchLike = fetch,
+  dependencies: OutboundRequestOptions = {},
 ) {
   const db = getDb(env.DB);
   const server = await db.query.mcpServer.findFirst({ where: eq(mcpServer.id, id) });
   assertMcpServerOwner(server, userId);
 
-  if (!server.encryptedAuthData || server.status !== "connected") {
-    throw new ApiError(409, "Reconnect this MCP server before testing it");
-  }
-
-  const tokenData = await decryptJson<McpTokenData>(
-    server.encryptedAuthData,
-    env.MCP_AUTH_ENCRYPTION_KEY,
-  );
-  if (!tokenData.access_token) {
-    throw new ApiError(409, "Reconnect this MCP server before testing it");
-  }
-
-  const response = await fetcher(server.serverUrl, {
-    method: "GET",
-    redirect: "manual",
-    headers: {
-      accept: "application/json, text/event-stream",
-      authorization: `Bearer ${tokenData.access_token}`,
-    },
-  });
-
   const now = new Date();
-  if (response.status >= 300 && response.status < 400) {
+  try {
+    const tokenData = await getUsableTokenData(env, server, dependencies);
+    const response = await safeOutboundFetch(
+      server.serverUrl,
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${tokenData.access_token}`,
+          "content-type": "application/json",
+          "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "connection-test",
+          method: "initialize",
+          params: {
+            protocolVersion: MCP_PROTOCOL_VERSION,
+            capabilities: {},
+            clientInfo: { name: "Tendon", version: "1.0.0" },
+          },
+        }),
+      },
+      dependencies,
+    );
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      throw new ApiError(502, "MCP server test returned an unsafe redirect");
+    }
+    if (response.status === 401 || response.status === 403) {
+      await response.body?.cancel();
+      await db
+        .update(mcpServer)
+        .set({
+          status: "needs_reconnect",
+          lastTestAt: now,
+          lastTestStatus: "failed",
+          lastError: "Authorization was rejected. Reconnect to continue.",
+          updatedAt: now,
+        })
+        .where(and(eq(mcpServer.id, id), eq(mcpServer.userId, userId)));
+      throw new ApiError(409, "MCP server authorization needs to be renewed");
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new ApiError(502, `MCP server test failed with HTTP ${response.status}`);
+    }
+    await parseInitializeResponse(response);
+
     await db
       .update(mcpServer)
       .set({
         lastTestAt: now,
-        lastTestStatus: "failed",
-        lastError: "The MCP server returned a redirect during testing.",
+        lastTestStatus: "ok",
+        lastError: null,
         updatedAt: now,
       })
       .where(and(eq(mcpServer.id, id), eq(mcpServer.userId, userId)));
-    throw new ApiError(502, "MCP server test returned an unsafe redirect");
-  }
-
-  const ok = response.ok || response.status === 405 || response.status === 406;
-  await db
-    .update(mcpServer)
-    .set({
-      lastTestAt: now,
-      lastTestStatus: ok ? "ok" : "failed",
-      lastError: ok ? null : `MCP server test failed with HTTP ${response.status}`,
-      updatedAt: now,
-    })
-    .where(and(eq(mcpServer.id, id), eq(mcpServer.userId, userId)));
-
-  if (!ok) {
-    throw new ApiError(502, "MCP server test failed", { status: response.status });
+  } catch (error) {
+    if (!(error instanceof ApiError && error.status === 409)) {
+      await db
+        .update(mcpServer)
+        .set({
+          lastTestAt: now,
+          lastTestStatus: "failed",
+          lastError: "Connection test failed. Check the endpoint and try again.",
+          updatedAt: now,
+        })
+        .where(and(eq(mcpServer.id, id), eq(mcpServer.userId, userId)));
+    }
+    throw error;
   }
 
   const updated = await db.query.mcpServer.findFirst({ where: eq(mcpServer.id, id) });
   if (!updated) throw new ApiError(404, "MCP server not found");
   return serializeServer(updated);
+}
+
+/**
+ * Server-only integration point for chat runtimes. Never serialize this return value to a client.
+ */
+export async function getConnectedMcpServersForChat(
+  env: McpEnv,
+  userId: string,
+  dependencies: OutboundRequestOptions = {},
+) {
+  const servers = await getDb(env.DB).query.mcpServer.findMany({
+    where: and(eq(mcpServer.userId, userId), eq(mcpServer.status, "connected")),
+  });
+
+  const connections = await Promise.all(
+    servers.map(async (server) => {
+      try {
+        const token = await getUsableTokenData(env, server, dependencies);
+        return {
+          id: server.id,
+          name: server.name,
+          serverUrl: server.serverUrl,
+          headers: { authorization: `Bearer ${token.access_token}` },
+        };
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409) return null;
+        throw error;
+      }
+    }),
+  );
+  return connections.filter((connection) => connection !== null);
 }
