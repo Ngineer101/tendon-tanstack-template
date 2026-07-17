@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AlertCircle,
@@ -11,7 +11,7 @@ import {
   PlugZap,
   RefreshCw,
   ShieldCheck,
-  Trash2,
+  Unplug,
 } from "lucide-react";
 
 import { Badge } from "#/components/ui/badge";
@@ -57,6 +57,7 @@ interface DiscoveryResult {
   tokenEndpoint: string;
   registrationAvailable: boolean;
   scopesSupported: string[];
+  resource: string;
 }
 
 interface FormState {
@@ -68,7 +69,7 @@ interface FormState {
 const emptyForm: FormState = {
   name: "",
   serverUrl: "",
-  scope: "openid profile offline_access",
+  scope: "",
 };
 
 const statusCopy: Record<McpStatus, { label: string; className: string }> = {
@@ -103,15 +104,18 @@ export function McpServersPanel({
   const [discovery, setDiscovery] = useState<DiscoveryResult>();
   const [flowError, setFlowError] = useState<string>();
   const [pending, setPending] = useState<string>();
+  const [actionMessage, setActionMessage] = useState<string>();
+  const [disconnectTarget, setDisconnectTarget] = useState<McpServer>();
 
   const canConnect = summary?.limit === null || (summary?.remaining ?? 0) > 0;
-  const dialogTitle = useMemo(() => {
+  const dialogTitle = (() => {
     if (dialogMode === "edit") return "Edit MCP server";
     if (dialogMode === "reconnect") return "Reconnect MCP server";
     return "Connect MCP server";
-  }, [dialogMode]);
+  })();
 
   async function loadServers() {
+    setLoadError(undefined);
     const response = await fetch("/api/mcp/servers");
     const result = (await response.json()) as McpSummary | { error?: string };
     if (!response.ok)
@@ -171,6 +175,10 @@ export function McpServersPanel({
       if (!response.ok)
         throw new Error("error" in result ? result.error : "OAuth discovery failed");
       setDiscovery(result as DiscoveryResult);
+      const discovered = result as DiscoveryResult;
+      if (!form.scope.trim() && discovered.scopesSupported.length) {
+        setForm((current) => ({ ...current, scope: discovered.scopesSupported.join(" ") }));
+      }
     } catch (reason) {
       setFlowError(reason instanceof Error ? reason.message : "OAuth discovery failed");
     } finally {
@@ -181,6 +189,11 @@ export function McpServersPanel({
   async function submitDialog() {
     if (dialogMode === "edit" && selectedServer) {
       await saveEdit(selectedServer);
+      return;
+    }
+
+    if (!discovery) {
+      setFlowError("Discover OAuth first so you can review the authorization endpoints.");
       return;
     }
 
@@ -222,6 +235,11 @@ export function McpServersPanel({
       if (!response.ok) throw new Error(result.error ?? "Unable to update MCP server");
       setDialogMode(undefined);
       await loadServers();
+      setActionMessage(
+        form.serverUrl !== server.serverUrl
+          ? "Server URL updated. Reconnect to authorize the new endpoint."
+          : "MCP server details updated.",
+      );
     } catch (reason) {
       setFlowError(reason instanceof Error ? reason.message : "Unable to update MCP server");
     } finally {
@@ -233,6 +251,7 @@ export function McpServersPanel({
     const actionKey = `${action}:${server.id}`;
     setPending(actionKey);
     setLoadError(undefined);
+    setActionMessage(undefined);
     try {
       const response = await fetch(
         action === "test"
@@ -246,11 +265,26 @@ export function McpServersPanel({
       const result = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(result.error ?? `Unable to ${action} MCP server`);
       await loadServers();
+      setActionMessage(
+        action === "test"
+          ? `${server.name} responded to the MCP initialize handshake.`
+          : `${server.name} was disconnected and its stored credentials were removed.`,
+      );
+      return true;
     } catch (reason) {
-      setLoadError(reason instanceof Error ? reason.message : `Unable to ${action} MCP server`);
+      const message = reason instanceof Error ? reason.message : `Unable to ${action} MCP server`;
+      await loadServers().catch(() => undefined);
+      setLoadError(message);
+      return false;
     } finally {
       setPending(undefined);
     }
+  }
+
+  async function confirmDisconnect() {
+    if (!disconnectTarget) return;
+    const disconnected = await runServerAction(disconnectTarget, "disconnect");
+    if (disconnected) setDisconnectTarget(undefined);
   }
 
   return (
@@ -282,6 +316,18 @@ export function McpServersPanel({
             <a href="/billing">Upgrade for unlimited servers</a>
           </Button>
         )}
+        {summary?.limit !== null && summary && (
+          <span className="ml-1 flex gap-1" aria-label={`${summary.activeCount} of 3 slots used`}>
+            {Array.from({ length: 3 }, (_, index) => (
+              <span
+                key={index}
+                className={`h-1.5 w-6 transition-colors duration-300 ${
+                  index < summary.activeCount ? "bg-primary" : "bg-muted"
+                }`}
+              />
+            ))}
+          </span>
+        )}
       </div>
 
       {oauthMessage?.type === "connected" && (
@@ -294,9 +340,29 @@ export function McpServersPanel({
           {oauthMessage.message ?? "Unable to finish MCP authorization."}
         </Feedback>
       )}
+      {oauthMessage?.type === "resume" && (
+        <Feedback className="mt-5 border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-200">
+          Sign-in interrupted the OAuth callback. Start the connection again to keep the handshake
+          bound to this account.
+        </Feedback>
+      )}
+      {actionMessage && (
+        <Feedback className="mt-5 border-primary/30 bg-primary/10 text-primary">
+          <span className="flex items-center gap-2">
+            <CheckCircle2 className="size-4" />
+            {actionMessage}
+          </span>
+        </Feedback>
+      )}
       {loadError && (
         <Feedback className="mt-5 border-destructive/30 bg-destructive/10 text-destructive">
-          {loadError}
+          <span className="flex flex-wrap items-center justify-between gap-3">
+            {loadError}
+            <Button size="sm" variant="outline" onClick={() => void loadServers()}>
+              <RefreshCw className="size-3.5" />
+              Retry
+            </Button>
+          </span>
         </Feedback>
       )}
 
@@ -314,7 +380,7 @@ export function McpServersPanel({
               onEdit={() => openEditDialog(server)}
               onReconnect={() => openReconnectDialog(server)}
               onTest={() => void runServerAction(server, "test")}
-              onDisconnect={() => void runServerAction(server, "disconnect")}
+              onDisconnect={() => setDisconnectTarget(server)}
             />
           ))
         ) : (
@@ -343,18 +409,29 @@ export function McpServersPanel({
           <DialogHeader>
             <DialogTitle>{dialogTitle}</DialogTitle>
             <DialogDescription>
-              Configure the MCP server URL, verify OAuth discovery, then authenticate directly with
-              the server.
+              {dialogMode === "edit"
+                ? "Update the label or endpoint. Changing the URL removes its credentials and requires a reconnect."
+                : "Configure the MCP server URL, verify OAuth discovery, then authenticate directly with the server."}
             </DialogDescription>
           </DialogHeader>
 
+          {dialogMode !== "edit" && (
+            <ol className="grid grid-cols-3 gap-2 text-xs" aria-label="Connection progress">
+              <FlowStep number="01" label="Configure" active />
+              <FlowStep number="02" label="Discover" active={!!discovery} />
+              <FlowStep number="03" label="Authorize" active={false} />
+            </ol>
+          )}
+
           <div className="grid gap-4">
             <Field
+              id="mcp-display-name"
               label="Display name"
               value={form.name}
               onChange={(name) => setForm({ ...form, name })}
             />
             <Field
+              id="mcp-server-url"
               label="Server URL"
               value={form.serverUrl}
               placeholder="https://mcp.example.com"
@@ -363,11 +440,15 @@ export function McpServersPanel({
                 setForm({ ...form, serverUrl });
               }}
             />
-            <Field
-              label="OAuth scopes"
-              value={form.scope}
-              onChange={(scope) => setForm({ ...form, scope })}
-            />
+            {dialogMode !== "edit" && (
+              <Field
+                id="mcp-oauth-scopes"
+                label="OAuth scopes"
+                value={form.scope}
+                hint="Leave blank to use the server's advertised minimum scopes."
+                onChange={(scope) => setForm({ ...form, scope })}
+              />
+            )}
 
             <div className="border bg-muted/30 p-3 transition-all duration-200">
               <div className="flex items-start gap-3">
@@ -392,6 +473,7 @@ export function McpServersPanel({
                   <MetadataRow label="Issuer" value={discovery.issuer ?? "Not provided"} />
                   <MetadataRow label="Authorization" value={discovery.authorizationEndpoint} />
                   <MetadataRow label="Token" value={discovery.tokenEndpoint} />
+                  <MetadataRow label="Token audience" value={discovery.resource} />
                   <MetadataRow
                     label="Registration"
                     value={
@@ -425,13 +507,59 @@ export function McpServersPanel({
                 Discover OAuth
               </Button>
             )}
-            <Button onClick={() => void submitDialog()} disabled={!!pending}>
+            <Button
+              onClick={() => void submitDialog()}
+              disabled={!!pending || (dialogMode !== "edit" && !discovery)}
+            >
               {pending === "connect" || pending?.startsWith("edit:") ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : (
                 <ExternalLink className="size-4" />
               )}
-              {dialogMode === "edit" ? "Save changes" : "Authenticate"}
+              {dialogMode === "edit"
+                ? "Save changes"
+                : discovery
+                  ? "Continue to authentication"
+                  : "Discover OAuth first"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!disconnectTarget}
+        onOpenChange={(open) => !open && !pending && setDisconnectTarget(undefined)}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Unplug className="size-5 text-destructive" />
+              Disconnect {disconnectTarget?.name}?
+            </DialogTitle>
+            <DialogDescription>
+              This removes the encrypted OAuth credentials immediately. The server stays visible in
+              your grid so you can reconnect it later.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDisconnectTarget(undefined)}
+              disabled={!!pending}
+            >
+              Keep connected
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void confirmDisconnect()}
+              disabled={!!pending}
+            >
+              {pending?.startsWith("disconnect:") ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Unplug className="size-4" />
+              )}
+              Disconnect server
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -469,7 +597,16 @@ function ServerCard({
               {new URL(server.serverUrl).hostname}
             </CardDescription>
           </div>
-          <Badge className={status.className}>{status.label}</Badge>
+          <Badge className={status.className}>
+            <span
+              className={`size-1.5 rounded-full ${
+                server.status === "connected"
+                  ? "bg-current motion-safe:animate-pulse"
+                  : "bg-current opacity-60"
+              }`}
+            />
+            {status.label}
+          </Badge>
         </div>
       </CardHeader>
       <CardContent className="flex min-h-40 flex-col justify-between gap-4">
@@ -494,7 +631,9 @@ function ServerCard({
             size="sm"
             variant="outline"
             onClick={onTest}
-            disabled={!!pending || server.status === "disconnected"}
+            disabled={
+              !!pending || server.status === "disconnected" || server.status === "needs_reconnect"
+            }
           >
             {testing ? (
               <Loader2 className="size-3.5 animate-spin" />
@@ -520,7 +659,7 @@ function ServerCard({
             {disconnecting ? (
               <Loader2 className="size-3.5 animate-spin" />
             ) : (
-              <Trash2 className="size-3.5" />
+              <Unplug className="size-3.5" />
             )}
             Disconnect
           </Button>
@@ -531,11 +670,15 @@ function ServerCard({
 }
 
 function Field({
+  hint,
+  id,
   label,
   onChange,
   placeholder,
   value,
 }: {
+  hint?: string;
+  id: string;
   label: string;
   onChange: (value: string) => void;
   placeholder?: string;
@@ -543,13 +686,33 @@ function Field({
 }) {
   return (
     <div className="grid gap-2">
-      <Label>{label}</Label>
+      <Label htmlFor={id}>{label}</Label>
       <Input
+        id={id}
         value={value}
         placeholder={placeholder}
+        aria-describedby={hint ? `${id}-hint` : undefined}
         onChange={(event) => onChange(event.target.value)}
       />
+      {hint && (
+        <p id={`${id}-hint`} className="text-xs text-muted-foreground">
+          {hint}
+        </p>
+      )}
     </div>
+  );
+}
+
+function FlowStep({ active, label, number }: { active: boolean; label: string; number: string }) {
+  return (
+    <li
+      className={`border px-3 py-2 transition-all duration-300 ${
+        active ? "border-primary/40 bg-primary/10 text-foreground" : "text-muted-foreground"
+      }`}
+    >
+      <span className="mr-2 font-mono text-[10px] text-primary">{number}</span>
+      {label}
+    </li>
   );
 }
 
@@ -564,10 +727,11 @@ function MetadataRow({ label, value }: { label: string; value: string }) {
 
 function Feedback({ children, className }: { children: ReactNode; className: string }) {
   return (
-    <p
+    <div
+      aria-live="polite"
       className={`animate-in fade-in-0 slide-in-from-top-1 border px-4 py-3 text-sm duration-200 ${className}`}
     >
       {children}
-    </p>
+    </div>
   );
 }

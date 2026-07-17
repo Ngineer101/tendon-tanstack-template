@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { z } from "zod";
 
-import { authenticatedApiHandler } from "#/lib/api";
+import { authenticatedApiHandler, parseJsonBody } from "#/lib/api";
 import {
   beginMcpOAuth,
   discoverMcpOAuth,
@@ -8,9 +9,12 @@ import {
   type McpEnv,
 } from "#/lib/mcp/core.server";
 
-async function readJson<T>(request: Request) {
-  return (await request.json().catch(() => ({}))) as Partial<T>;
-}
+const requestSchema = z.object({
+  name: z.string().trim().max(80).optional(),
+  serverUrl: z.string().trim().min(1, "Server URL is required.").max(2_048),
+  scope: z.string().trim().max(512).optional(),
+  mode: z.enum(["discover", "connect"]),
+});
 
 export const Route = createFileRoute("/api/mcp/servers")({
   server: {
@@ -20,19 +24,15 @@ export const Route = createFileRoute("/api/mcp/servers")({
       }),
       POST: authenticatedApiHandler<McpEnv>(
         async ({ env, origin, request, user }) => {
-          const body = await readJson<{
-            name: string;
-            serverUrl: string;
-            scope: string;
-            mode: "discover" | "connect";
-          }>(request);
+          const body = await parseJsonBody(request, requestSchema);
 
           if (body.mode === "discover") {
-            const discovery = await discoverMcpOAuth(String(body.serverUrl ?? ""));
+            const discovery = await discoverMcpOAuth(body.serverUrl);
             return Response.json({
               issuer: discovery.issuer,
               authorizationEndpoint: discovery.authorizationEndpoint,
               tokenEndpoint: discovery.tokenEndpoint,
+              resource: discovery.resource,
               registrationAvailable: !!discovery.registrationEndpoint,
               scopesSupported: discovery.scopesSupported,
             });
@@ -41,7 +41,7 @@ export const Route = createFileRoute("/api/mcp/servers")({
           const result = await beginMcpOAuth(env, {
             userId: user.id,
             name: body.name,
-            serverUrl: String(body.serverUrl ?? ""),
+            serverUrl: body.serverUrl,
             scope: body.scope,
             origin,
           });

@@ -10,6 +10,10 @@ import {
   normalizeMcpServerUrl,
 } from "./core.server";
 
+function requestUrl(input: RequestInfo | URL) {
+  return typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+}
+
 describe("MCP server URL safety", () => {
   it("normalizes public HTTPS server URLs", () => {
     expect(normalizeMcpServerUrl("https://mcp.example.com/sse#ignored")).toBe(
@@ -25,6 +29,9 @@ describe("MCP server URL safety", () => {
       "https://10.0.0.2/sse",
       "https://user:pass@mcp.example.com/sse",
       "https://metadata.google.internal/sse",
+      "https://2130706433/sse",
+      "https://[::1]/sse",
+      "https://mcp.example.com@127.0.0.1/sse",
     ];
 
     for (const url of unsafeUrls) {
@@ -42,13 +49,27 @@ describe("MCP entitlement limits", () => {
     );
   });
 
-  it("allows paid plans and reconnects beyond the free limit", () => {
+  it("allows paid plans and active reconnections beyond the free limit", () => {
     expect(() =>
       assertCanConnectMcpServer({ plan: "pro_monthly", activeServerCount: 12 }),
     ).not.toThrow();
     expect(() =>
-      assertCanConnectMcpServer({ plan: "free", activeServerCount: 3, reconnecting: true }),
+      assertCanConnectMcpServer({
+        plan: "free",
+        activeServerCount: 3,
+        existingStatus: "connected",
+      }),
     ).not.toThrow();
+  });
+
+  it("requires a free slot when reconnecting a disconnected server", () => {
+    expect(() =>
+      assertCanConnectMcpServer({
+        plan: "free",
+        activeServerCount: 3,
+        existingStatus: "disconnected",
+      }),
+    ).toThrowError(/up to 3 MCP servers/);
   });
 });
 
@@ -85,6 +106,15 @@ describe("MCP auth encryption", () => {
       /encryption is not configured/,
     );
   });
+
+  it("rejects tampered ciphertext", async () => {
+    const secret = "test-secret-with-at-least-thirty-two-characters";
+    const encrypted = await encryptJson(secret, { accessToken: "secret" });
+    const envelope = JSON.parse(encrypted) as { ciphertext: string };
+    envelope.ciphertext = `${envelope.ciphertext.slice(0, -2)}aa`;
+
+    await expect(decryptJson(secret, JSON.stringify(envelope))).rejects.toThrow();
+  });
 });
 
 describe("MCP OAuth discovery", () => {
@@ -111,7 +141,9 @@ describe("MCP OAuth discovery", () => {
       }
       if (url === "https://mcp.example.com/.well-known/oauth-protected-resource") {
         return Response.json({
+          resource: "https://mcp.example.com/sse",
           authorization_servers: ["https://auth.example.com"],
+          scopes_supported: ["tools:read"],
         });
       }
       if (url === "https://auth.example.com/.well-known/oauth-authorization-server") {
@@ -127,11 +159,62 @@ describe("MCP OAuth discovery", () => {
     });
 
     await expect(discoverMcpOAuth("https://mcp.example.com/sse", fetcher)).resolves.toMatchObject({
-      issuer: "https://auth.example.com",
+      issuer: "https://auth.example.com/",
       authorizationEndpoint: "https://auth.example.com/authorize",
       tokenEndpoint: "https://auth.example.com/token",
       registrationEndpoint: "https://auth.example.com/register",
-      scopesSupported: ["openid", "profile"],
+      scopesSupported: ["tools:read", "openid", "profile"],
+      resource: "https://mcp.example.com/sse",
     });
+  });
+
+  it("uses path-specific protected resource metadata", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === "https://mcp.example.com/team/mcp") {
+        return new Response(null, { status: 401 });
+      }
+      if (url === "https://mcp.example.com/.well-known/oauth-protected-resource/team/mcp") {
+        return Response.json({
+          resource: "https://mcp.example.com/team/mcp",
+          authorization_servers: ["https://identity.example.com/tenant"],
+          scopes_supported: ["tools:read"],
+        });
+      }
+      if (url === "https://identity.example.com/.well-known/oauth-authorization-server/tenant") {
+        return Response.json({
+          issuer: "https://identity.example.com/tenant",
+          authorization_endpoint: "https://identity.example.com/tenant/authorize",
+          token_endpoint: "https://identity.example.com/tenant/token",
+        });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    await expect(
+      discoverMcpOAuth("https://mcp.example.com/team/mcp", fetcher),
+    ).resolves.toMatchObject({
+      issuer: "https://identity.example.com/tenant",
+      resource: "https://mcp.example.com/team/mcp",
+      scopesSupported: ["tools:read"],
+    });
+  });
+
+  it("rejects protected resource metadata for a different origin", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === "https://mcp.example.com/mcp") return new Response(null, { status: 401 });
+      if (url.includes("oauth-protected-resource")) {
+        return Response.json({
+          resource: "https://attacker.example/mcp",
+          authorization_servers: ["https://auth.example.com"],
+        });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    await expect(discoverMcpOAuth("https://mcp.example.com/mcp", fetcher)).rejects.toThrow(
+      /does not match the configured server/,
+    );
   });
 });

@@ -189,6 +189,7 @@ export const mcpOAuthState = sqliteTable("mcp_oauth_state", {
   }),
   name: text("name").notNull(),
   serverUrl: text("server_url").notNull(),
+  resource: text("resource").notNull().default(""),
   authorizationEndpoint: text("authorization_endpoint").notNull(),
   tokenEndpoint: text("token_endpoint").notNull(),
   issuer: text("issuer"),

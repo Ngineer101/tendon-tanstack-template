@@ -89,6 +89,25 @@ feature needs custom control flow. Both use a conditional D1 update so simultane
 spend below zero.
 Stripe webhook handling is idempotent, and each credit purchase can only be granted once.
 
+## MCP Server Connections
+
+Authenticated users can connect OAuth-enabled MCP servers from `/dashboard`. Free accounts are
+limited to three active configurations; the Pro `unlimited_mcp_servers` entitlement removes the
+limit. The API enforces ownership, entitlement, OAuth state, and same-origin rules server-side.
+
+Before using the feature, generate a high-entropy encryption secret of at least 32 characters and
+set it only in the server environment:
+
+```sh
+vp exec wrangler secret put MCP_AUTH_ENCRYPTION_KEY
+```
+
+Authorization servers without Dynamic Client Registration also require server-side
+`MCP_OAUTH_CLIENT_ID` and, when applicable, `MCP_OAUTH_CLIENT_SECRET`. Apply the checked-in D1
+migrations through the normal release process; they are not applied automatically. Detailed flow,
+security, migration, assumption, and verification notes are in
+[`docs/mcp-server-connections.md`](docs/mcp-server-connections.md).
+
 For promotions or manual admin grants, call `grantCredits` from an admin-only server route:
 
 ```ts

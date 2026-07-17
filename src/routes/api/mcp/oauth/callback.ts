@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
 import { getAuth } from "#/lib/auth";
+import { ApiError } from "#/lib/api-error";
 import { completeMcpOAuth, type McpEnv } from "#/lib/mcp/core.server";
 
 export const Route = createFileRoute("/api/mcp/oauth/callback")({
@@ -23,7 +24,7 @@ export const Route = createFileRoute("/api/mcp/oauth/callback")({
           });
         }
 
-        if (!state || !code) {
+        if (!state || !code || state.length > 512 || code.length > 4_096) {
           throw redirect({
             to: "/dashboard",
             search: {
@@ -45,7 +46,7 @@ export const Route = createFileRoute("/api/mcp/oauth/callback")({
           await completeMcpOAuth(env as McpEnv, { userId: session.user.id, state, code });
         } catch (error) {
           const message =
-            error instanceof Error ? error.message : "Unable to finish MCP authorization.";
+            error instanceof ApiError ? error.message : "Unable to finish MCP authorization.";
           throw redirect({
             to: "/dashboard",
             search: { mcp: "error" as const, message },

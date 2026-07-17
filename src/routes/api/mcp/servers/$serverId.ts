@@ -1,11 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { z } from "zod";
 
-import { authenticatedApiHandler } from "#/lib/api";
+import { authenticatedApiHandler, parseJsonBody } from "#/lib/api";
 import { disconnectMcpServer, updateMcpServer, type McpEnv } from "#/lib/mcp/core.server";
 
-async function readJson<T>(request: Request) {
-  return (await request.json().catch(() => ({}))) as Partial<T>;
-}
+const updateSchema = z
+  .object({
+    name: z.string().trim().max(80).optional(),
+    serverUrl: z.string().trim().min(1, "Server URL is required.").max(2_048).optional(),
+  })
+  .refine((value) => value.name !== undefined || value.serverUrl !== undefined, {
+    message: "Provide a name or server URL to update.",
+  });
 
 export const Route = createFileRoute("/api/mcp/servers/$serverId")({
   server: {
@@ -13,7 +19,7 @@ export const Route = createFileRoute("/api/mcp/servers/$serverId")({
       PATCH: authenticatedApiHandler<McpEnv>(
         async ({ env, params, request, user }) => {
           const { serverId } = params;
-          const body = await readJson<{ name: string; serverUrl: string }>(request);
+          const body = await parseJsonBody(request, updateSchema);
           await updateMcpServer(env, user.id, serverId, {
             name: body.name,
             serverUrl: body.serverUrl,

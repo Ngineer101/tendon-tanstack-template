@@ -1,9 +1,9 @@
-import { and, count, desc, eq, ne } from "drizzle-orm";
+import { and, count, desc, eq, gte, lt, ne } from "drizzle-orm";
 
 import { getDb } from "#/db";
 import { mcpOAuthState, mcpServerConnection } from "#/db/schema";
 import { ApiError } from "#/lib/api-error";
-import { getBillingSummary } from "#/lib/billing/core.server";
+import { hasEntitlement } from "#/lib/billing/core.server";
 import type { BillingEnv } from "#/lib/billing/config.server";
 
 export const FREE_MCP_SERVER_LIMIT = 3;
@@ -12,9 +12,54 @@ const SAFE_FETCH_HEADERS = {
   accept: "application/json, application/oauth-authz-server+jwt;q=0.8",
 };
 
-const DEFAULT_MCP_SCOPE = "openid profile offline_access";
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const MAX_DISCOVERY_BYTES = 64_000;
+const MAX_TOKEN_BYTES = 64_000;
+const OUTBOUND_TIMEOUT_MS = 10_000;
+const TOKEN_REFRESH_SKEW_SECONDS = 60;
+const MCP_PROTOCOL_VERSION = "2025-11-25";
+
+export const MCP_INSERT_CONNECTION_SQL = `
+INSERT INTO mcp_server_connection (
+  id, user_id, name, server_url, status, auth_data_encrypted,
+  oauth_issuer, oauth_client_id, scopes, last_error, created_at, updated_at
+)
+SELECT ?, ?, ?, ?, 'connected', ?, ?, ?, ?, NULL, unixepoch(), unixepoch()
+WHERE ? = 1
+   OR EXISTS (
+     SELECT 1 FROM mcp_server_connection
+     WHERE user_id = ? AND server_url = ? AND status <> 'disconnected'
+   )
+   OR (
+     SELECT COUNT(*) FROM mcp_server_connection
+     WHERE user_id = ? AND status <> 'disconnected'
+   ) < ?
+ON CONFLICT(user_id, server_url) DO UPDATE SET
+  name = excluded.name,
+  status = 'connected',
+  auth_data_encrypted = excluded.auth_data_encrypted,
+  oauth_issuer = excluded.oauth_issuer,
+  oauth_client_id = excluded.oauth_client_id,
+  scopes = excluded.scopes,
+  last_error = NULL,
+  updated_at = unixepoch()
+`;
+
+export const MCP_RECONNECT_CONNECTION_SQL = `
+UPDATE mcp_server_connection
+SET name = ?, server_url = ?, status = 'connected', auth_data_encrypted = ?,
+    oauth_issuer = ?, oauth_client_id = ?, scopes = ?, last_error = NULL,
+    updated_at = unixepoch()
+WHERE id = ? AND user_id = ?
+  AND (
+    ? = 1
+    OR status <> 'disconnected'
+    OR (
+      SELECT COUNT(*) FROM mcp_server_connection
+      WHERE user_id = ? AND status <> 'disconnected'
+    ) < ?
+  )
+`;
 
 export type McpConnectionStatus = "connected" | "needs_reconnect" | "error" | "disconnected";
 
@@ -37,6 +82,13 @@ export interface McpConnectionView {
   updatedAt: Date;
 }
 
+export interface McpChatConnection {
+  id: string;
+  name: string;
+  serverUrl: string;
+  authorization: string;
+}
+
 interface OAuthServerMetadata {
   issuer?: string;
   authorization_endpoint?: string;
@@ -44,6 +96,8 @@ interface OAuthServerMetadata {
   registration_endpoint?: string;
   scopes_supported?: string[];
   authorization_servers?: string[];
+  resource?: string;
+  scope?: string;
 }
 
 interface OAuthClientRegistration {
@@ -57,6 +111,7 @@ interface DiscoveredOAuthServer {
   tokenEndpoint: string;
   registrationEndpoint?: string;
   scopesSupported: string[];
+  resource: string;
 }
 
 interface BeginMcpOAuthInput {
@@ -74,6 +129,10 @@ interface StoredAuthData {
   tokenType?: string;
   expiresAt?: number;
   scope?: string;
+  tokenEndpoint: string;
+  clientId: string;
+  clientSecret?: string;
+  resource: string;
 }
 
 type Fetcher = typeof fetch;
@@ -85,9 +144,14 @@ export function isUnlimitedMcpPlan(plan: "free" | "pro_monthly") {
 export function assertCanConnectMcpServer(options: {
   plan: "free" | "pro_monthly";
   activeServerCount: number;
-  reconnecting?: boolean;
+  existingStatus?: McpConnectionStatus;
 }) {
-  if (options.reconnecting || isUnlimitedMcpPlan(options.plan)) return;
+  if (
+    isUnlimitedMcpPlan(options.plan) ||
+    (options.existingStatus && options.existingStatus !== "disconnected")
+  ) {
+    return;
+  }
 
   if (options.activeServerCount >= FREE_MCP_SERVER_LIMIT) {
     throw new ApiError(402, "Free accounts can connect up to 3 MCP servers.", {
@@ -106,6 +170,9 @@ export function assertMcpConnectionOwner<TConnection extends { userId: string }>
 }
 
 export function normalizeMcpServerUrl(input: string) {
+  if (typeof input !== "string" || input.length > 2_048) {
+    throw new ApiError(400, "Enter a valid HTTPS server URL.");
+  }
   let url: URL;
   try {
     url = new URL(input.trim());
@@ -121,7 +188,12 @@ export function normalizeMcpServerUrl(input: string) {
 }
 
 export function assertSafeOutboundUrl(input: string | URL) {
-  const url = typeof input === "string" ? new URL(input) : input;
+  let url: URL;
+  try {
+    url = typeof input === "string" ? new URL(input) : input;
+  } catch {
+    throw new ApiError(400, "OAuth discovery returned an invalid endpoint URL.");
+  }
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
 
   if (url.protocol !== "https:") {
@@ -133,7 +205,7 @@ export function assertSafeOutboundUrl(input: string | URL) {
   if (!hostname.includes(".") && !hostname.includes(":")) {
     throw new ApiError(400, "Use a public fully qualified hostname for MCP servers.");
   }
-  if (isUnsafeHostname(hostname) || isPrivateIpLiteral(hostname)) {
+  if (hostname.includes(":") || isUnsafeHostname(hostname) || isPrivateIpLiteral(hostname)) {
     throw new ApiError(400, "This MCP server URL points to a restricted network address.");
   }
 
@@ -142,8 +214,8 @@ export function assertSafeOutboundUrl(input: string | URL) {
 
 export async function listMcpServers(env: McpEnv, userId: string) {
   const db = getDb(env.DB);
-  const [summary, servers, activeCount] = await Promise.all([
-    getBillingSummary(env, userId),
+  const [unlimited, servers, activeCount] = await Promise.all([
+    hasEntitlement(env, userId, "unlimited_mcp_servers"),
     db.query.mcpServerConnection.findMany({
       where: eq(mcpServerConnection.userId, userId),
       orderBy: [desc(mcpServerConnection.createdAt)],
@@ -151,8 +223,8 @@ export async function listMcpServers(env: McpEnv, userId: string) {
     getActiveMcpServerCount(env, userId),
   ]);
 
-  const plan = summary.plan === "pro_monthly" ? "pro_monthly" : "free";
-  const limit = isUnlimitedMcpPlan(plan) ? null : FREE_MCP_SERVER_LIMIT;
+  const plan = unlimited ? "pro_monthly" : "free";
+  const limit = unlimited ? null : FREE_MCP_SERVER_LIMIT;
   return {
     plan,
     limit,
@@ -168,22 +240,40 @@ export async function discoverMcpOAuth(
 ): Promise<DiscoveredOAuthServer> {
   const normalizedServerUrl = normalizeMcpServerUrl(serverUrl);
   const server = new URL(normalizedServerUrl);
-  const metadataUrls = new Set<string>();
+  const protectedResourceUrls = new Set<string>();
 
-  const resourceMetadataUrl = await getResourceMetadataFromChallenge(normalizedServerUrl, fetcher);
-  if (resourceMetadataUrl) metadataUrls.add(resourceMetadataUrl);
+  const challenge = await getResourceMetadataFromChallenge(normalizedServerUrl, fetcher);
+  if (challenge?.metadataUrl) protectedResourceUrls.add(challenge.metadataUrl);
 
-  metadataUrls.add(new URL("/.well-known/oauth-protected-resource", server.origin).toString());
-  metadataUrls.add(new URL("/.well-known/oauth-authorization-server", server.origin).toString());
-  metadataUrls.add(new URL("/.well-known/openid-configuration", server.origin).toString());
+  const endpointPath = server.pathname === "/" ? "" : server.pathname;
+  protectedResourceUrls.add(
+    new URL(`/.well-known/oauth-protected-resource${endpointPath}`, server.origin).toString(),
+  );
+  protectedResourceUrls.add(
+    new URL("/.well-known/oauth-protected-resource", server.origin).toString(),
+  );
 
   const authorizationServerUrls = new Set<string>();
-  for (const metadataUrl of metadataUrls) {
+  const discoveredScopes = new Set<string>(parseScope(challenge?.scope));
+  let resource = normalizedServerUrl;
+
+  for (const metadataUrl of protectedResourceUrls) {
     const metadata = await tryFetchOAuthMetadata(metadataUrl, fetcher);
     if (!metadata) continue;
 
+    for (const scope of validateDiscoveredScopes(metadata.scopes_supported)) {
+      discoveredScopes.add(scope);
+    }
+    if (metadata.resource) {
+      const advertisedResource = assertSafeOutboundUrl(metadata.resource);
+      if (advertisedResource.origin !== server.origin) {
+        throw new ApiError(422, "MCP resource metadata does not match the configured server.");
+      }
+      resource = advertisedResource.toString();
+    }
+
     if (metadata.authorization_endpoint && metadata.token_endpoint) {
-      return toDiscoveredOAuthServer(metadata);
+      return toDiscoveredOAuthServer(metadata, resource, [...discoveredScopes]);
     }
 
     for (const authorizationServer of metadata.authorization_servers ?? []) {
@@ -191,18 +281,17 @@ export async function discoverMcpOAuth(
     }
   }
 
+  // Compatibility fallback for older MCP servers that publish authorization metadata at origin.
+  if (!authorizationServerUrls.size) authorizationServerUrls.add(server.origin);
+
   for (const authorizationServer of authorizationServerUrls) {
     const issuer = assertSafeOutboundUrl(authorizationServer);
-    const issuerPaths = [
-      new URL("/.well-known/oauth-authorization-server", issuer.origin).toString(),
-      new URL("/.well-known/openid-configuration", issuer.origin).toString(),
-      issuer.toString(),
-    ];
+    const issuerPaths = buildAuthorizationMetadataUrls(issuer);
 
     for (const metadataUrl of issuerPaths) {
       const metadata = await tryFetchOAuthMetadata(metadataUrl, fetcher);
       if (metadata?.authorization_endpoint && metadata.token_endpoint) {
-        return toDiscoveredOAuthServer(metadata);
+        return toDiscoveredOAuthServer(metadata, resource, [...discoveredScopes], issuer);
       }
     }
   }
@@ -213,22 +302,48 @@ export async function discoverMcpOAuth(
 export async function beginMcpOAuth(env: McpEnv, input: BeginMcpOAuthInput) {
   const normalizedServerUrl = normalizeMcpServerUrl(input.serverUrl);
   const db = getDb(env.DB);
-  const reconnecting = !!input.connectionId;
+  let existingStatus: McpConnectionStatus | undefined;
+
+  await db
+    .delete(mcpOAuthState)
+    .where(and(eq(mcpOAuthState.userId, input.userId), lt(mcpOAuthState.expiresAt, new Date())));
 
   if (input.connectionId) {
     const existing = await db.query.mcpServerConnection.findFirst({
       where: eq(mcpServerConnection.id, input.connectionId),
     });
     assertMcpConnectionOwner(existing, input.userId);
+    existingStatus = existing.status as McpConnectionStatus;
+
+    if (existing.serverUrl !== normalizedServerUrl) {
+      const duplicate = await db.query.mcpServerConnection.findFirst({
+        where: and(
+          eq(mcpServerConnection.userId, input.userId),
+          eq(mcpServerConnection.serverUrl, normalizedServerUrl),
+          ne(mcpServerConnection.id, input.connectionId),
+        ),
+      });
+      if (duplicate) {
+        throw new ApiError(409, "You already have an MCP connection for this server URL.");
+      }
+    }
   }
 
-  const summary = await getBillingSummary(env, input.userId);
-  const activeServerCount = await getActiveMcpServerCount(env, input.userId);
-  const plan = summary.plan === "pro_monthly" ? "pro_monthly" : "free";
-  assertCanConnectMcpServer({ plan, activeServerCount, reconnecting });
+  const [unlimited, activeServerCount] = await Promise.all([
+    hasEntitlement(env, input.userId, "unlimited_mcp_servers"),
+    getActiveMcpServerCount(env, input.userId),
+  ]);
+  assertCanConnectMcpServer({
+    plan: unlimited ? "pro_monthly" : "free",
+    activeServerCount,
+    existingStatus,
+  });
 
   const discovery = await discoverMcpOAuth(normalizedServerUrl);
-  const redirectUri = new URL("/api/mcp/oauth/callback", input.origin).toString();
+  const redirectUri = new URL(
+    "/api/mcp/oauth/callback",
+    getTrustedOrigin(env, input.origin),
+  ).toString();
   const client = await resolveOAuthClient(env, discovery, redirectUri);
   const state = randomUrlToken(32);
   const codeVerifier = randomUrlToken(64);
@@ -242,22 +357,28 @@ export async function beginMcpOAuth(env: McpEnv, input: BeginMcpOAuthInput) {
   authorizationUrl.searchParams.set("state", state);
   authorizationUrl.searchParams.set("code_challenge", codeChallenge);
   authorizationUrl.searchParams.set("code_challenge_method", "S256");
+  authorizationUrl.searchParams.set("resource", discovery.resource);
   if (scope) authorizationUrl.searchParams.set("scope", scope);
 
+  const transientSecrets = await encryptJson(env.MCP_AUTH_ENCRYPTION_KEY, {
+    codeVerifier,
+    clientSecret: client.client_secret,
+  });
+  const stateHash = await hashOAuthState(state);
+
   await db.insert(mcpOAuthState).values({
-    state,
+    state: stateHash,
     userId: input.userId,
     connectionId: input.connectionId,
     name: normalizeConnectionName(input.name, normalizedServerUrl),
     serverUrl: normalizedServerUrl,
+    resource: discovery.resource,
     authorizationEndpoint: discovery.authorizationEndpoint,
     tokenEndpoint: discovery.tokenEndpoint,
     issuer: discovery.issuer,
     clientId: client.client_id,
-    clientSecretEncrypted: client.client_secret
-      ? await encryptJson(env.MCP_AUTH_ENCRYPTION_KEY, { clientSecret: client.client_secret })
-      : null,
-    codeVerifier,
+    clientSecretEncrypted: transientSecrets,
+    codeVerifier: "encrypted:v1",
     scope,
     redirectUri,
     expiresAt: new Date(Date.now() + OAUTH_STATE_TTL_MS),
@@ -274,30 +395,36 @@ export async function completeMcpOAuth(
   options: { userId: string; state: string; code: string },
 ) {
   const db = getDb(env.DB);
-  const oauthState = await db.query.mcpOAuthState.findFirst({
-    where: eq(mcpOAuthState.state, options.state),
-  });
+  const stateHash = await hashOAuthState(options.state);
+  const [oauthState] = await db
+    .delete(mcpOAuthState)
+    .where(
+      and(
+        eq(mcpOAuthState.state, stateHash),
+        eq(mcpOAuthState.userId, options.userId),
+        gte(mcpOAuthState.expiresAt, new Date()),
+      ),
+    )
+    .returning();
 
-  if (!oauthState || oauthState.userId !== options.userId || oauthState.expiresAt < new Date()) {
+  if (!oauthState) {
     throw new ApiError(400, "OAuth session expired. Start the MCP connection again.");
   }
 
-  const clientSecret = oauthState.clientSecretEncrypted
-    ? (
-        await decryptJson<{ clientSecret: string }>(
-          env.MCP_AUTH_ENCRYPTION_KEY,
-          oauthState.clientSecretEncrypted,
-        )
-      ).clientSecret
-    : env.MCP_OAUTH_CLIENT_SECRET;
+  const transientSecrets = await decryptJson<{
+    codeVerifier: string;
+    clientSecret?: string;
+  }>(env.MCP_AUTH_ENCRYPTION_KEY, oauthState.clientSecretEncrypted ?? "");
+  const clientSecret = transientSecrets.clientSecret ?? env.MCP_OAUTH_CLIENT_SECRET;
 
   const tokenResponse = await exchangeOAuthCode({
     tokenEndpoint: oauthState.tokenEndpoint,
     code: options.code,
     clientId: oauthState.clientId,
     clientSecret,
-    codeVerifier: oauthState.codeVerifier,
+    codeVerifier: transientSecrets.codeVerifier,
     redirectUri: oauthState.redirectUri,
+    resource: oauthState.resource,
   });
 
   const authData: StoredAuthData = {
@@ -309,58 +436,24 @@ export async function completeMcpOAuth(
         ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in
         : undefined,
     scope: tokenResponse.scope ?? oauthState.scope ?? undefined,
+    tokenEndpoint: oauthState.tokenEndpoint,
+    clientId: oauthState.clientId,
+    clientSecret,
+    resource: oauthState.resource,
   };
   const encryptedAuthData = await encryptJson(env.MCP_AUTH_ENCRYPTION_KEY, authData);
-
-  if (oauthState.connectionId) {
-    const existing = await db.query.mcpServerConnection.findFirst({
-      where: eq(mcpServerConnection.id, oauthState.connectionId),
-    });
-    assertMcpConnectionOwner(existing, options.userId);
-    await db
-      .update(mcpServerConnection)
-      .set({
-        name: oauthState.name,
-        serverUrl: oauthState.serverUrl,
-        status: "connected",
-        authDataEncrypted: encryptedAuthData,
-        oauthIssuer: oauthState.issuer,
-        oauthClientId: oauthState.clientId,
-        scopes: authData.scope ?? oauthState.scope,
-        lastError: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(mcpServerConnection.id, oauthState.connectionId));
-  } else {
-    await db
-      .insert(mcpServerConnection)
-      .values({
-        id: createId("mcp"),
-        userId: options.userId,
-        name: oauthState.name,
-        serverUrl: oauthState.serverUrl,
-        status: "connected",
-        authDataEncrypted: encryptedAuthData,
-        oauthIssuer: oauthState.issuer,
-        oauthClientId: oauthState.clientId,
-        scopes: authData.scope ?? oauthState.scope,
-      })
-      .onConflictDoUpdate({
-        target: [mcpServerConnection.userId, mcpServerConnection.serverUrl],
-        set: {
-          name: oauthState.name,
-          status: "connected",
-          authDataEncrypted: encryptedAuthData,
-          oauthIssuer: oauthState.issuer,
-          oauthClientId: oauthState.clientId,
-          scopes: authData.scope ?? oauthState.scope,
-          lastError: null,
-          updatedAt: new Date(),
-        },
-      });
-  }
-
-  await db.delete(mcpOAuthState).where(eq(mcpOAuthState.state, options.state));
+  const unlimited = await hasEntitlement(env, options.userId, "unlimited_mcp_servers");
+  await persistCompletedMcpConnection(env, {
+    connectionId: oauthState.connectionId ?? undefined,
+    encryptedAuthData,
+    issuer: oauthState.issuer,
+    name: oauthState.name,
+    oauthClientId: oauthState.clientId,
+    scopes: authData.scope ?? oauthState.scope,
+    serverUrl: oauthState.serverUrl,
+    unlimited,
+    userId: options.userId,
+  });
 }
 
 export async function updateMcpServer(
@@ -400,6 +493,10 @@ export async function updateMcpServer(
       serverUrl: nextServerUrl,
       status: serverUrlChanged ? "needs_reconnect" : existing.status,
       authDataEncrypted: serverUrlChanged ? null : existing.authDataEncrypted,
+      oauthIssuer: serverUrlChanged ? null : existing.oauthIssuer,
+      oauthClientId: serverUrlChanged ? null : existing.oauthClientId,
+      scopes: serverUrlChanged ? null : existing.scopes,
+      lastTestedAt: serverUrlChanged ? null : existing.lastTestedAt,
       lastError: serverUrlChanged
         ? "Reconnect to authorize the updated server URL."
         : existing.lastError,
@@ -437,26 +534,48 @@ export async function testMcpServer(env: McpEnv, userId: string, serverId: strin
     throw new ApiError(409, "Reconnect this MCP server before testing it.");
   }
 
-  const authData = await decryptJson<StoredAuthData>(
-    env.MCP_AUTH_ENCRYPTION_KEY,
-    existing.authDataEncrypted,
-  );
+  const authData = await getFreshAuthData(env, {
+    ...existing,
+    authDataEncrypted: existing.authDataEncrypted,
+  });
   const serverUrl = normalizeMcpServerUrl(existing.serverUrl);
   const response = await safeFetch(serverUrl, {
+    method: "POST",
     headers: {
-      accept: "application/json",
-      authorization: `${authData.tokenType ?? "Bearer"} ${authData.accessToken}`,
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${authData.accessToken}`,
+      "content-type": "application/json",
+      "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+      origin: getTrustedOrigin(env, env.BETTER_AUTH_URL),
     },
     redirect: "manual",
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: `connection-test-${crypto.randomUUID()}`,
+      method: "initialize",
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "Tendon MCP Connector", version: "1.0" },
+      },
+    }),
   });
 
-  const ok = response.status >= 200 && response.status < 400;
-  const lastError = ok ? null : `Server responded with HTTP ${response.status}`;
+  const ok = response.status >= 200 && response.status < 300;
+  const needsReconnect = response.status === 401;
+  const lastError = ok
+    ? null
+    : needsReconnect
+      ? "Authorization expired. Reconnect this server."
+      : response.status === 403
+        ? "The authorized account does not have the required MCP scopes."
+        : `MCP initialize returned HTTP ${response.status}.`;
+  await response.body?.cancel();
 
   await db
     .update(mcpServerConnection)
     .set({
-      status: ok ? "connected" : "error",
+      status: ok ? "connected" : needsReconnect ? "needs_reconnect" : "error",
       lastTestedAt: new Date(),
       lastError,
       updatedAt: new Date(),
@@ -468,6 +587,167 @@ export async function testMcpServer(env: McpEnv, userId: string, serverId: strin
   }
 
   return { ok: true };
+}
+
+/**
+ * Server-only adapter for chat handlers. Never serialize this return value to a client or log it.
+ */
+export async function getMcpConnectionsForChat(
+  env: McpEnv,
+  userId: string,
+): Promise<McpChatConnection[]> {
+  const db = getDb(env.DB);
+  const connections = await db.query.mcpServerConnection.findMany({
+    where: and(eq(mcpServerConnection.userId, userId), eq(mcpServerConnection.status, "connected")),
+  });
+
+  const resolved = await Promise.all(
+    connections
+      .filter(
+        (connection): connection is typeof connection & { authDataEncrypted: string } =>
+          !!connection.authDataEncrypted,
+      )
+      .map(async (connection) => {
+        try {
+          const authData = await getFreshAuthData(env, connection);
+          return {
+            id: connection.id,
+            name: connection.name,
+            serverUrl: normalizeMcpServerUrl(connection.serverUrl),
+            authorization: `Bearer ${authData.accessToken}`,
+          };
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409) return null;
+          throw error;
+        }
+      }),
+  );
+  return resolved.filter((connection): connection is McpChatConnection => connection !== null);
+}
+
+async function persistCompletedMcpConnection(
+  env: McpEnv,
+  input: {
+    connectionId?: string;
+    encryptedAuthData: string;
+    issuer: string | null;
+    name: string;
+    oauthClientId: string;
+    scopes: string | null;
+    serverUrl: string;
+    unlimited: boolean;
+    userId: string;
+  },
+) {
+  const values = [
+    input.name,
+    input.serverUrl,
+    input.encryptedAuthData,
+    input.issuer,
+    input.oauthClientId,
+    input.scopes,
+  ];
+  const statement = input.connectionId
+    ? env.DB.prepare(MCP_RECONNECT_CONNECTION_SQL).bind(
+        ...values,
+        input.connectionId,
+        input.userId,
+        input.unlimited ? 1 : 0,
+        input.userId,
+        FREE_MCP_SERVER_LIMIT,
+      )
+    : env.DB.prepare(MCP_INSERT_CONNECTION_SQL).bind(
+        createId("mcp"),
+        input.userId,
+        ...values,
+        input.unlimited ? 1 : 0,
+        input.userId,
+        input.serverUrl,
+        input.userId,
+        FREE_MCP_SERVER_LIMIT,
+      );
+  const result = await statement.run();
+
+  if (result.meta.changes === 0) {
+    throw new ApiError(402, "Free accounts can connect up to 3 MCP servers.", {
+      limit: FREE_MCP_SERVER_LIMIT,
+    });
+  }
+}
+
+async function getFreshAuthData(
+  env: McpEnv,
+  connection: typeof mcpServerConnection.$inferSelect & { authDataEncrypted: string },
+) {
+  const authData = await decryptJson<StoredAuthData>(
+    env.MCP_AUTH_ENCRYPTION_KEY,
+    connection.authDataEncrypted,
+  );
+  const now = Math.floor(Date.now() / 1_000);
+  if (!authData.expiresAt || authData.expiresAt > now + TOKEN_REFRESH_SKEW_SECONDS) {
+    return authData;
+  }
+  if (!authData.refreshToken) {
+    await getDb(env.DB)
+      .update(mcpServerConnection)
+      .set({
+        status: "needs_reconnect",
+        lastError: "Authorization expired. Reconnect this server.",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(mcpServerConnection.id, connection.id),
+          eq(mcpServerConnection.userId, connection.userId),
+        ),
+      );
+    throw new ApiError(409, "MCP authorization expired. Reconnect this server.");
+  }
+
+  let refreshed: Awaited<ReturnType<typeof refreshOAuthToken>>;
+  try {
+    refreshed = await refreshOAuthToken(authData);
+  } catch {
+    await getDb(env.DB)
+      .update(mcpServerConnection)
+      .set({
+        status: "needs_reconnect",
+        lastError: "Authorization expired. Reconnect this server.",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(mcpServerConnection.id, connection.id),
+          eq(mcpServerConnection.userId, connection.userId),
+        ),
+      );
+    throw new ApiError(409, "MCP authorization expired. Reconnect this server.");
+  }
+
+  const updated: StoredAuthData = {
+    ...authData,
+    accessToken: refreshed.access_token,
+    refreshToken: refreshed.refresh_token ?? authData.refreshToken,
+    tokenType: refreshed.token_type ?? authData.tokenType,
+    scope: refreshed.scope ?? authData.scope,
+    expiresAt: typeof refreshed.expires_in === "number" ? now + refreshed.expires_in : undefined,
+  };
+  const encrypted = await encryptJson(env.MCP_AUTH_ENCRYPTION_KEY, updated);
+  await getDb(env.DB)
+    .update(mcpServerConnection)
+    .set({
+      authDataEncrypted: encrypted,
+      status: "connected",
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(mcpServerConnection.id, connection.id),
+        eq(mcpServerConnection.userId, connection.userId),
+      ),
+    );
+  return updated;
 }
 
 async function getActiveMcpServerCount(env: McpEnv, userId: string) {
@@ -532,8 +812,16 @@ async function resolveOAuthClient(
     throw new ApiError(502, "MCP OAuth client registration failed.");
   }
 
-  const registration = (await response.json()) as Partial<OAuthClientRegistration>;
-  if (!registration.client_id) {
+  const registration = await readBoundedJson<Partial<OAuthClientRegistration>>(
+    response,
+    MAX_TOKEN_BYTES,
+    "MCP OAuth registration response is too large.",
+  );
+  if (
+    typeof registration.client_id !== "string" ||
+    !registration.client_id ||
+    registration.client_id.length > 2_048
+  ) {
     throw new ApiError(502, "MCP OAuth registration response did not include a client ID.");
   }
   return registration as OAuthClientRegistration;
@@ -546,6 +834,7 @@ async function exchangeOAuthCode(options: {
   clientSecret?: string;
   codeVerifier: string;
   redirectUri: string;
+  resource: string;
 }) {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
@@ -553,6 +842,7 @@ async function exchangeOAuthCode(options: {
     client_id: options.clientId,
     code_verifier: options.codeVerifier,
     redirect_uri: options.redirectUri,
+    resource: options.resource,
   });
   if (options.clientSecret) body.set("client_secret", options.clientSecret);
 
@@ -567,72 +857,139 @@ async function exchangeOAuthCode(options: {
     throw new ApiError(502, "MCP OAuth token exchange failed.");
   }
 
-  const payload = (await response.json()) as {
+  const payload = await readBoundedJson<{
     access_token?: string;
     refresh_token?: string;
     token_type?: string;
     expires_in?: number;
     scope?: string;
-  };
-  if (!payload.access_token) {
+  }>(response, MAX_TOKEN_BYTES, "MCP OAuth token response is too large.");
+  if (!isSafeToken(payload.access_token)) {
     throw new ApiError(502, "MCP OAuth token response did not include an access token.");
   }
   return { ...payload, access_token: payload.access_token };
 }
 
-async function getResourceMetadataFromChallenge(serverUrl: string, fetcher: Fetcher) {
-  const response = await fetcher(serverUrl, {
-    method: "GET",
-    headers: { accept: "application/json" },
-    redirect: "manual",
+async function refreshOAuthToken(authData: StoredAuthData) {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: authData.refreshToken ?? "",
+    client_id: authData.clientId,
+    resource: authData.resource,
   });
+  if (authData.clientSecret) body.set("client_secret", authData.clientSecret);
+
+  const response = await safeFetch(authData.tokenEndpoint, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    body,
+  });
+  if (!response.ok) throw new ApiError(502, "MCP OAuth token refresh failed.");
+
+  const payload = await readBoundedJson<{
+    access_token?: string;
+    refresh_token?: string;
+    token_type?: string;
+    expires_in?: number;
+    scope?: string;
+  }>(response, MAX_TOKEN_BYTES, "MCP OAuth token response is too large.");
+  if (!isSafeToken(payload.access_token)) {
+    throw new ApiError(502, "MCP OAuth refresh response did not include an access token.");
+  }
+  return { ...payload, access_token: payload.access_token };
+}
+
+async function getResourceMetadataFromChallenge(serverUrl: string, fetcher: Fetcher) {
+  let response: Response;
+  try {
+    response = await safeFetch(
+      serverUrl,
+      {
+        method: "GET",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+        },
+      },
+      fetcher,
+    );
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    return undefined;
+  }
 
   if (isRedirect(response.status)) {
     throw new ApiError(400, "MCP discovery redirects are not followed.");
   }
 
   const header = response.headers.get("www-authenticate");
+  await response.body?.cancel();
   if (!header) return undefined;
 
-  const match = header.match(/resource_metadata="([^"]+)"/i);
-  if (!match?.[1]) return undefined;
-  return assertSafeOutboundUrl(match[1]).toString();
+  const metadataMatch = header.match(/resource_metadata="([^"]+)"/i);
+  const scopeMatch = header.match(/scope="([^"]+)"/i);
+  return {
+    metadataUrl: metadataMatch?.[1]
+      ? assertSafeOutboundUrl(metadataMatch[1]).toString()
+      : undefined,
+    scope: scopeMatch?.[1],
+  };
 }
 
 async function tryFetchOAuthMetadata(metadataUrl: string, fetcher: Fetcher) {
   try {
     const response = await safeFetch(metadataUrl, { headers: SAFE_FETCH_HEADERS }, fetcher);
     if (!response.ok) return undefined;
-    const text = await response.text();
-    if (text.length > MAX_DISCOVERY_BYTES) {
-      throw new ApiError(502, "MCP OAuth discovery response is too large.");
-    }
-    return JSON.parse(text) as OAuthServerMetadata;
+    return await readBoundedJson<OAuthServerMetadata>(
+      response,
+      MAX_DISCOVERY_BYTES,
+      "MCP OAuth discovery response is too large.",
+    );
   } catch (error) {
     if (error instanceof ApiError && error.status < 500) throw error;
     return undefined;
   }
 }
 
-function toDiscoveredOAuthServer(metadata: OAuthServerMetadata): DiscoveredOAuthServer {
+function toDiscoveredOAuthServer(
+  metadata: OAuthServerMetadata,
+  resource: string,
+  resourceScopes: string[],
+  expectedIssuer?: URL,
+): DiscoveredOAuthServer {
   if (!metadata.authorization_endpoint || !metadata.token_endpoint) {
     throw new ApiError(422, "OAuth metadata is missing required endpoints.");
   }
 
+  if (
+    expectedIssuer &&
+    metadata.issuer &&
+    normalizeIssuer(metadata.issuer) !== normalizeIssuer(expectedIssuer.toString())
+  ) {
+    throw new ApiError(422, "OAuth metadata issuer did not match the advertised server.");
+  }
+
   return {
-    issuer: metadata.issuer,
+    issuer: metadata.issuer ? assertSafeOutboundUrl(metadata.issuer).toString() : undefined,
     authorizationEndpoint: assertSafeOutboundUrl(metadata.authorization_endpoint).toString(),
     tokenEndpoint: assertSafeOutboundUrl(metadata.token_endpoint).toString(),
     registrationEndpoint: metadata.registration_endpoint
       ? assertSafeOutboundUrl(metadata.registration_endpoint).toString()
       : undefined,
-    scopesSupported: metadata.scopes_supported ?? [],
+    scopesSupported: [
+      ...new Set([...resourceScopes, ...validateDiscoveredScopes(metadata.scopes_supported)]),
+    ],
+    resource,
   };
 }
 
 async function safeFetch(input: string, init: RequestInit = {}, fetcher: Fetcher = fetch) {
   assertSafeOutboundUrl(input);
-  const response = await fetcher(input, { ...init, redirect: "manual" });
+  const response = await fetcher(input, {
+    ...init,
+    redirect: "manual",
+    signal: init.signal ?? AbortSignal.timeout(OUTBOUND_TIMEOUT_MS),
+  });
   if (isRedirect(response.status)) {
     throw new ApiError(400, "Redirects are not followed for MCP server requests.");
   }
@@ -644,23 +1001,121 @@ function isRedirect(status: number) {
 }
 
 function sanitizeScope(scope: string | undefined, supportedScopes: string[]) {
-  const requested = (scope ?? DEFAULT_MCP_SCOPE)
-    .split(/\s+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+  const requested = parseScope(scope);
 
-  if (!requested.length) return undefined;
+  if (!requested.length) return supportedScopes.length ? supportedScopes.join(" ") : undefined;
   if (!supportedScopes.length) return requested.join(" ");
 
   const supported = new Set(supportedScopes);
   const allowed = requested.filter((item) => supported.has(item));
-  return (allowed.length ? allowed : requested.slice(0, 1)).join(" ");
+  if (!allowed.length) {
+    throw new ApiError(400, "None of the requested OAuth scopes are supported by this server.");
+  }
+  return allowed.join(" ");
 }
 
 function normalizeConnectionName(name: string | undefined, serverUrl: string) {
-  const trimmed = name?.trim();
+  const trimmed = typeof name === "string" ? name.trim() : undefined;
   if (trimmed) return trimmed.slice(0, 80);
   return new URL(serverUrl).hostname;
+}
+
+function buildAuthorizationMetadataUrls(issuer: URL) {
+  const issuerPath = issuer.pathname === "/" ? "" : issuer.pathname.replace(/\/$/, "");
+  return [
+    new URL(`/.well-known/oauth-authorization-server${issuerPath}`, issuer.origin).toString(),
+    new URL(`${issuerPath}/.well-known/openid-configuration`, issuer.origin).toString(),
+    new URL(`/.well-known/openid-configuration${issuerPath}`, issuer.origin).toString(),
+  ];
+}
+
+function normalizeIssuer(value: string) {
+  const issuer = assertSafeOutboundUrl(value);
+  issuer.hash = "";
+  issuer.search = "";
+  issuer.pathname = issuer.pathname.replace(/\/$/, "") || "/";
+  return issuer.toString();
+}
+
+function parseScope(value: string | undefined) {
+  if (!value?.trim()) return [];
+  if (value.length > 512) throw new ApiError(400, "OAuth scopes are too long.");
+
+  const scopes = [...new Set(value.trim().split(/\s+/))];
+  if (scopes.some((scope) => !/^[\x21\x23-\x5b\x5d-\x7e]{1,64}$/.test(scope))) {
+    throw new ApiError(400, "OAuth scopes contain unsupported characters.");
+  }
+  return scopes;
+}
+
+function validateDiscoveredScopes(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const scopes = value.filter((scope): scope is string => typeof scope === "string");
+  if (scopes.length !== value.length) {
+    throw new ApiError(422, "OAuth discovery returned invalid scope metadata.");
+  }
+  return parseScope(scopes.join(" "));
+}
+
+function isSafeToken(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 16_384) return false;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint <= 31 || codePoint === 127) return false;
+  }
+  return true;
+}
+
+async function readBoundedJson<T>(response: Response, maxBytes: number, tooLargeMessage: string) {
+  if (!response.body) throw new ApiError(502, "MCP server returned an empty response.");
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new ApiError(502, tooLargeMessage);
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  } catch {
+    throw new ApiError(502, "MCP server returned invalid JSON.");
+  }
+}
+
+function getTrustedOrigin(env: McpEnv, requestOrigin: string) {
+  let configuredOrigin: string;
+  try {
+    configuredOrigin = new URL(env.BETTER_AUTH_URL).origin;
+  } catch {
+    throw new ApiError(500, "Application authentication URL is not configured.");
+  }
+  if (new URL(requestOrigin).origin !== configuredOrigin) {
+    throw new ApiError(403, "MCP OAuth must start from the configured application origin.");
+  }
+  return configuredOrigin;
+}
+
+async function hashOAuthState(state: string) {
+  if (typeof state !== "string" || state.length < 20 || state.length > 512) {
+    throw new ApiError(400, "OAuth session expired. Start the MCP connection again.");
+  }
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(state));
+  return bytesToBase64Url(new Uint8Array(digest));
 }
 
 function isUnsafeHostname(hostname: string) {
