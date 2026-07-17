@@ -66,6 +66,19 @@ pnpm exec wrangler secret put STRIPE_CREDITS_5000_PRICE_ID
 pnpm exec wrangler secret put STRIPE_CREDITS_20000_PRICE_ID
 ```
 
+## MCP Server Connections
+
+The dashboard includes MCP (Model Context Protocol) server connections with OAuth discovery,
+encrypted credential storage, and plan-based limits (3 servers on Free, unlimited on Pro).
+See [docs/mcp-servers.md](docs/mcp-servers.md) for architecture and security decisions.
+
+Set the encryption key locally in `.dev.vars` and as a production secret — generate one with
+`openssl rand -base64 32`:
+
+```sh
+pnpm exec wrangler secret put MCP_ENCRYPTION_KEY
+```
+
 To enable Stripe Tax after configuring it in the Dashboard, set `STRIPE_TAX_ENABLED=true` locally
 and add it as a Wrangler variable or secret in production.
 
