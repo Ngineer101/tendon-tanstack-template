@@ -149,3 +149,37 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+export const mcpServer = sqliteTable("mcp_server", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  label: text("label").notNull(),
+  serverUrl: text("server_url").notNull(),
+  oauthDiscoveryUrl: text("oauth_discovery_url"),
+  encryptedAuthToken: text("encrypted_auth_token"),
+  authStatus: text("auth_status").notNull().default("pending"),
+  lastTestedAt: integer("last_tested_at", { mode: "timestamp" }),
+  lastError: text("last_error"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
+export const mcpOauthState = sqliteTable("mcp_oauth_state", {
+  id: text("id").primaryKey(),
+  serverId: text("server_id")
+    .notNull()
+    .references(() => mcpServer.id, { onDelete: "cascade" }),
+  codeVerifier: text("code_verifier").notNull(),
+  state: text("state").notNull(),
+  redirectUri: text("redirect_uri").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});

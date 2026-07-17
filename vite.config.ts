@@ -26,6 +26,9 @@ const config = defineConfig({
   fmt: { ignorePatterns: ["src/routeTree.gen.ts"] },
   resolve: { tsconfigPaths: true },
   plugins,
+  test: {
+    include: ["src/**/__tests__/**/*.test.{ts,tsx}"],
+  },
 });
 
 export default config;
