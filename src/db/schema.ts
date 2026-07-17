@@ -149,3 +149,56 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+// MCP server connections
+export const mcpServerConnection = sqliteTable(
+  "mcp_server_connection",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    serverUrl: text("server_url").notNull(),
+    status: text("status").notNull().default("connected"),
+    authDataEncrypted: text("auth_data_encrypted"),
+    oauthIssuer: text("oauth_issuer"),
+    oauthClientId: text("oauth_client_id"),
+    scopes: text("scopes"),
+    lastTestedAt: integer("last_tested_at", { mode: "timestamp" }),
+    lastError: text("last_error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [
+    uniqueIndex("mcp_server_connection_user_url_unique").on(table.userId, table.serverUrl),
+  ],
+);
+
+export const mcpOAuthState = sqliteTable("mcp_oauth_state", {
+  state: text("state").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  connectionId: text("connection_id").references(() => mcpServerConnection.id, {
+    onDelete: "cascade",
+  }),
+  name: text("name").notNull(),
+  serverUrl: text("server_url").notNull(),
+  authorizationEndpoint: text("authorization_endpoint").notNull(),
+  tokenEndpoint: text("token_endpoint").notNull(),
+  issuer: text("issuer"),
+  clientId: text("client_id").notNull(),
+  clientSecretEncrypted: text("client_secret_encrypted"),
+  codeVerifier: text("code_verifier").notNull(),
+  scope: text("scope"),
+  redirectUri: text("redirect_uri").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});

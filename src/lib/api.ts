@@ -14,6 +14,7 @@ interface ApiHandlerOptions {
 interface ApiHandlerContext<TEnv extends Cloudflare.Env> {
   env: TEnv;
   origin: string;
+  params: Record<string, string>;
   request: Request;
 }
 
@@ -25,7 +26,10 @@ interface AuthenticatedApiHandlerContext<
   };
 }
 
-type RouteHandler = (context: { request: Request }) => Promise<Response>;
+type RouteHandler = (context: {
+  params?: Record<string, string>;
+  request: Request;
+}) => Promise<Response>;
 
 function getOrigin(request: Request, requireSameOrigin: boolean) {
   const requestOrigin = new URL(request.url).origin;
@@ -56,11 +60,12 @@ export function publicApiHandler<TEnv extends Cloudflare.Env>(
   handler: (context: ApiHandlerContext<TEnv>) => Response | Promise<Response>,
   options: ApiHandlerOptions = {},
 ): RouteHandler {
-  return async ({ request }) => {
+  return async ({ params, request }) => {
     try {
       return await handler({
         env: env as TEnv,
         origin: getOrigin(request, options.sameOrigin ?? false),
+        params: params ?? {},
         request,
       });
     } catch (error) {
