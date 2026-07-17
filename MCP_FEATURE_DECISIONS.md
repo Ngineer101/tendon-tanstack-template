@@ -58,6 +58,11 @@
 **Decision**: Used `@tabler/icons-react` for MCP UI components since it's already a dependency of the project.
 **Rationale**: Consistency with existing codebase dependencies. All icons used have clear semantic meaning.
 
+### 12. Testing: Pure-function tests with Vitest
+
+**Decision**: Test pure-domain logic (validation, encryption, OAuth primitives) in isolation. DB-dependent integration tests deferred to e2e/integration suite.
+**Rationale**: `core.server.ts` functions depend on D1 (Cloudflare Workers D1Database) which cannot be instantiated outside the Workers runtime. Unit tests validate the pure functions (URL validation, encryption round-trips, label validation, public serialization) that are the foundation of the domain logic.
+
 ## Assumptions
 
 1. **MCP servers expose a `/health` endpoint**: The test connection feature assumes servers have a reachable health endpoint. If a server doesn't have one, the test will report an error, and the user will need to trust the "connected" status from OAuth.
@@ -73,6 +78,8 @@
 3. **MCP_ENCRYPTION_KEY generation**: The encryption key must be generated and set in the environment before the feature can be used in production. Generate with `openssl rand -base64 32`.
 4. **Refresh token flow**: The refresh token logic exists in `oauth.ts` but is not wired into the connection test or any automatic refresh mechanism.
 5. **Tailwind CSS animation classes**: The `animate-in`, `fade-in-0`, `slide-in-from-bottom-*`, `zoom-in-95` classes are from `tw-animate-css` which is already in the project's dependencies. These were used based on the assumption they work with Tailwind v4.
+6. **API handler tests (authenticatedApiHandler/publicApiHandler)**: `api.ts` imports `cloudflare:workers` which is only available in the Workers runtime. Unit tests for the handler wrappers require a Workers-compatible test environment (e.g., `unstable_dev` or Miniflare). Skipped in favor of pure-domain logic tests.
+7. **DB integration tests**: Drizzle queries against D1 cannot be tested in vitest's Node environment. Integration tests should use `wrangler dev --test` or Miniflare with a local D1 binding.
 
 ## Security Considerations
 
