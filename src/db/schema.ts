@@ -149,3 +149,22 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+export const mcpServer = sqliteTable("mcp_server", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  serverUrl: text("server_url").notNull(),
+  status: text("status").notNull().default("disconnected"),
+  encryptedCredentials: text("encrypted_credentials"),
+  oauthProvider: text("oauth_provider"),
+  lastTestedAt: integer("last_tested_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
