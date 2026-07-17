@@ -113,6 +113,30 @@ an admin grant endpoint until the host app adds its own admin authorization poli
   metered subscription invoicing rather than immediate in-app balance enforcement.
 - Display prices in `src/lib/billing/config.ts` must match the corresponding Stripe Price objects.
 
+## MCP Server Connections
+
+Users can connect [Model Context Protocol](https://modelcontextprotocol.io) servers from the
+dashboard. Free accounts connect up to 3 servers; the Pro subscription unlocks unlimited
+servers through the `unlimited_mcp_servers` entitlement in `src/lib/billing/config.ts`.
+
+The connect flow validates the URL (HTTPS-only for public hosts, SSRF policy), probes the
+server with an MCP `initialize` handshake, and — when the server answers 401 — runs OAuth
+discovery (RFC 9728 / RFC 8414), dynamic client registration (RFC 7591), and a PKCE
+authorization redirect. OAuth credentials are encrypted with AES-256-GCM before they are
+stored in D1; the encryption key comes from the `MCP_ENCRYPTION_KEY` environment secret:
+
+```sh
+openssl rand -base64 32
+# local: add MCP_ENCRYPTION_KEY=<value> to .dev.vars
+pnpm exec wrangler secret put MCP_ENCRYPTION_KEY
+```
+
+Apply the migration with `pnpm run db:migrate` locally and `pnpm run db:migrate:prod` in
+production. Connect, reconnect, edit, test, and disconnect are all supported from the
+dashboard grid. Chat features resolve fresh credentials server-side via
+`getMcpAccessToken(env, userId, serverId)` in `src/lib/mcp/core.server.ts`. Design decisions
+and assumptions are documented in `docs/mcp-server-connections.md`.
+
 ## Cloudflare Background Jobs
 
 This template includes light boilerplate for Cloudflare Queues, Cron Triggers, and Workflows.

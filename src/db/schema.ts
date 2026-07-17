@@ -149,3 +149,52 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+// MCP server connections
+export const mcpServer = sqliteTable(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    url: text("url").notNull(),
+    status: text("status").notNull().default("pending_auth"),
+    authType: text("auth_type").notNull().default("none"),
+    authServerIssuer: text("auth_server_issuer"),
+    encryptedAuthData: text("encrypted_auth_data"),
+    serverName: text("server_name"),
+    serverVersion: text("server_version"),
+    toolCount: integer("tool_count"),
+    lastTestedAt: integer("last_tested_at", { mode: "timestamp" }),
+    lastError: text("last_error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [uniqueIndex("mcp_server_user_id_url_unique").on(table.userId, table.url)],
+);
+
+export const mcpOauthSession = sqliteTable(
+  "mcp_oauth_session",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    serverId: text("server_id")
+      .notNull()
+      .references(() => mcpServer.id, { onDelete: "cascade" }),
+    state: text("state").notNull(),
+    encryptedVerifier: text("encrypted_verifier").notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [uniqueIndex("mcp_oauth_session_state_unique").on(table.state)],
+);
