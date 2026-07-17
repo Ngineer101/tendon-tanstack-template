@@ -141,6 +141,25 @@ export const creditTransaction = sqliteTable(
   (table) => [uniqueIndex("credit_transaction_reference_unique").on(table.reference)],
 );
 
+export const mcpServer = sqliteTable("mcp_server", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  label: text("label").notNull(),
+  url: text("url").notNull(),
+  authType: text("auth_type"),
+  encryptedAuthData: text("encrypted_auth_data"),
+  oauthState: text("oauth_state"),
+  status: text("status").notNull().default("disconnected"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+});
+
 export const stripeEvent = sqliteTable("stripe_event", {
   id: text("id").primaryKey(),
   type: text("type").notNull(),
