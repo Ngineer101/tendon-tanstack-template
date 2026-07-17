@@ -1,4 +1,5 @@
 import { defineConfig } from "vite-plus";
+import type { PluginOption } from "vite";
 import { devtools } from "@tanstack/devtools-vite";
 
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
@@ -9,6 +10,14 @@ import { cloudflare } from "@cloudflare/vite-plugin";
 
 const isVitest = !!process.env.VITEST;
 
+const plugins: PluginOption[] = [
+  devtools(),
+  ...(isVitest ? [] : [cloudflare({ viteEnvironment: { name: "ssr" } })]),
+  tailwindcss(),
+  tanstackStart(),
+  viteReact(),
+];
+
 const config = defineConfig({
   staged: {
     "*": "vp check --fix",
@@ -16,13 +25,7 @@ const config = defineConfig({
   lint: { options: { typeAware: true, typeCheck: true } },
   fmt: { ignorePatterns: ["src/routeTree.gen.ts"] },
   resolve: { tsconfigPaths: true },
-  plugins: [
-    devtools(),
-    !isVitest && cloudflare({ viteEnvironment: { name: "ssr" } }),
-    tailwindcss(),
-    tanstackStart(),
-    viteReact(),
-  ].filter(Boolean),
+  plugins,
 });
 
 export default config;

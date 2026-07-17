@@ -1,0 +1,21 @@
+allowBuilds:
+  "@google/genai": false
+  better-sqlite3: true
+  esbuild: true
+  msw: false
+  protobufjs: false
+  sharp: false
+  workerd: false
+minimumReleaseAgeExclude:
+  - "@voidzero-dev/vite-plus-core@0.2.5"
+  - vite-plus@0.2.5
+  - miniflare@4.20260714.0
+  - wrangler@4.112.0
+  - "@voidzero-dev/vite-plus-darwin-arm64@0.2.5"
+  - "@voidzero-dev/vite-plus-darwin-x64@0.2.5"
+  - "@voidzero-dev/vite-plus-linux-arm64-gnu@0.2.5"
+  - "@voidzero-dev/vite-plus-linux-arm64-musl@0.2.5"
+  - "@voidzero-dev/vite-plus-linux-x64-gnu@0.2.5"
+  - "@voidzero-dev/vite-plus-linux-x64-musl@0.2.5"
+  - "@voidzero-dev/vite-plus-win32-arm64-msvc@0.2.5"
+  - "@voidzero-dev/vite-plus-win32-x64-msvc@0.2.5"
