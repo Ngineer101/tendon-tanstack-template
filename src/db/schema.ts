@@ -149,3 +149,62 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+// MCP server connections
+export const mcpServer = sqliteTable(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    // Normalized server URL (https only in non-dev mode). Stored without credentials.
+    serverUrl: text("server_url").notNull(),
+    // OAuth authorization endpoint discovered from the server metadata.
+    authorizationEndpoint: text("authorization_endpoint"),
+    // OAuth token endpoint discovered from the server metadata.
+    tokenEndpoint: text("token_endpoint"),
+    // OAuth registration endpoint (if the server supports dynamic client registration).
+    registrationEndpoint: text("registration_endpoint"),
+    // Encrypted credentials blob (access_token, refresh_token, expires_at, scope, clientId, clientSecret).
+    // Never returned to the client. Encrypted with the env-managed MCP_ENCRYPTION_KEY.
+    encryptedAuth: text("encrypted_auth"),
+    // Lifecycle status of the connection.
+    // - "pending": metadata discovered, awaiting user authorization
+    // - "connected": user authorized, tokens stored
+    // - "disconnected": user disconnected, credentials wiped
+    // - "error": the connection is in a recoverable error state
+    status: text("status").notNull().default("pending"),
+    // Human-readable last error message (never includes secrets). Cleared on success.
+    lastError: text("last_error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [
+    uniqueIndex("mcp_server_user_id_server_url_unique").on(table.userId, table.serverUrl),
+  ],
+);
+
+// Short-lived OAuth flow state (PKCE verifier, OAuth state nonce, pending metadata).
+// Consumed exactly once by the OAuth callback and rotated on every new attempt.
+export const mcpOAuthState = sqliteTable("mcp_oauth_state", {
+  id: text("id").primaryKey(),
+  mcpServerId: text("mcp_server_id")
+    .notNull()
+    .references(() => mcpServer.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  state: text("state").notNull().unique(),
+  codeVerifier: text("code_verifier").notNull(),
+  redirectUri: text("redirect_uri").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+});

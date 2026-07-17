@@ -15,6 +15,13 @@
       "when": 1780257272334,
       "tag": "0001_military_exodus",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784317775706,
+      "tag": "0002_pink_tombstone",
+      "breakpoints": true
     }
   ]
 }

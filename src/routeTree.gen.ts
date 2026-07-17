@@ -23,6 +23,9 @@ import { Route as ApiBillingPortalRouteImport } from './routes/api/billing/porta
 import { Route as ApiBillingConsumeRouteImport } from './routes/api/billing/consume'
 import { Route as ApiBillingCheckoutRouteImport } from './routes/api/billing/checkout'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
+import { Route as ApiMcpServersIndexRouteImport } from './routes/api/mcp/servers/index'
+import { Route as ApiMcpServersIdRouteImport } from './routes/api/mcp/servers/$id'
+import { Route as ApiMcpOauthCallbackRouteImport } from './routes/api/mcp/oauth/callback'
 
 const SignUpRoute = SignUpRouteImport.update({
   id: '/sign-up',
@@ -93,6 +96,21 @@ const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
   path: '/api/auth/$',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiMcpServersIndexRoute = ApiMcpServersIndexRouteImport.update({
+  id: '/api/mcp/servers/',
+  path: '/api/mcp/servers/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiMcpServersIdRoute = ApiMcpServersIdRouteImport.update({
+  id: '/api/mcp/servers/$id',
+  path: '/api/mcp/servers/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiMcpOauthCallbackRoute = ApiMcpOauthCallbackRouteImport.update({
+  id: '/api/mcp/oauth/callback',
+  path: '/api/mcp/oauth/callback',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -108,6 +126,9 @@ export interface FileRoutesByFullPath {
   '/api/billing/portal': typeof ApiBillingPortalRoute
   '/api/billing/summary': typeof ApiBillingSummaryRoute
   '/api/billing/webhook': typeof ApiBillingWebhookRoute
+  '/api/mcp/oauth/callback': typeof ApiMcpOauthCallbackRoute
+  '/api/mcp/servers/$id': typeof ApiMcpServersIdRoute
+  '/api/mcp/servers/': typeof ApiMcpServersIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -123,6 +144,9 @@ export interface FileRoutesByTo {
   '/api/billing/portal': typeof ApiBillingPortalRoute
   '/api/billing/summary': typeof ApiBillingSummaryRoute
   '/api/billing/webhook': typeof ApiBillingWebhookRoute
+  '/api/mcp/oauth/callback': typeof ApiMcpOauthCallbackRoute
+  '/api/mcp/servers/$id': typeof ApiMcpServersIdRoute
+  '/api/mcp/servers': typeof ApiMcpServersIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -140,6 +164,9 @@ export interface FileRoutesById {
   '/api/billing/portal': typeof ApiBillingPortalRoute
   '/api/billing/summary': typeof ApiBillingSummaryRoute
   '/api/billing/webhook': typeof ApiBillingWebhookRoute
+  '/api/mcp/oauth/callback': typeof ApiMcpOauthCallbackRoute
+  '/api/mcp/servers/$id': typeof ApiMcpServersIdRoute
+  '/api/mcp/servers/': typeof ApiMcpServersIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -157,6 +184,9 @@ export interface FileRouteTypes {
     | '/api/billing/portal'
     | '/api/billing/summary'
     | '/api/billing/webhook'
+    | '/api/mcp/oauth/callback'
+    | '/api/mcp/servers/$id'
+    | '/api/mcp/servers/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -172,6 +202,9 @@ export interface FileRouteTypes {
     | '/api/billing/portal'
     | '/api/billing/summary'
     | '/api/billing/webhook'
+    | '/api/mcp/oauth/callback'
+    | '/api/mcp/servers/$id'
+    | '/api/mcp/servers'
   id:
     | '__root__'
     | '/'
@@ -188,6 +221,9 @@ export interface FileRouteTypes {
     | '/api/billing/portal'
     | '/api/billing/summary'
     | '/api/billing/webhook'
+    | '/api/mcp/oauth/callback'
+    | '/api/mcp/servers/$id'
+    | '/api/mcp/servers/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -203,6 +239,9 @@ export interface RootRouteChildren {
   ApiBillingPortalRoute: typeof ApiBillingPortalRoute
   ApiBillingSummaryRoute: typeof ApiBillingSummaryRoute
   ApiBillingWebhookRoute: typeof ApiBillingWebhookRoute
+  ApiMcpOauthCallbackRoute: typeof ApiMcpOauthCallbackRoute
+  ApiMcpServersIdRoute: typeof ApiMcpServersIdRoute
+  ApiMcpServersIndexRoute: typeof ApiMcpServersIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -305,6 +344,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiAuthSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/mcp/servers/': {
+      id: '/api/mcp/servers/'
+      path: '/api/mcp/servers'
+      fullPath: '/api/mcp/servers/'
+      preLoaderRoute: typeof ApiMcpServersIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mcp/servers/$id': {
+      id: '/api/mcp/servers/$id'
+      path: '/api/mcp/servers/$id'
+      fullPath: '/api/mcp/servers/$id'
+      preLoaderRoute: typeof ApiMcpServersIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mcp/oauth/callback': {
+      id: '/api/mcp/oauth/callback'
+      path: '/api/mcp/oauth/callback'
+      fullPath: '/api/mcp/oauth/callback'
+      preLoaderRoute: typeof ApiMcpOauthCallbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -335,6 +395,9 @@ const rootRouteChildren: RootRouteChildren = {
   ApiBillingPortalRoute: ApiBillingPortalRoute,
   ApiBillingSummaryRoute: ApiBillingSummaryRoute,
   ApiBillingWebhookRoute: ApiBillingWebhookRoute,
+  ApiMcpOauthCallbackRoute: ApiMcpOauthCallbackRoute,
+  ApiMcpServersIdRoute: ApiMcpServersIdRoute,
+  ApiMcpServersIndexRoute: ApiMcpServersIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
