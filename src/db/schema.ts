@@ -149,3 +149,39 @@ export const stripeEvent = sqliteTable("stripe_event", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
+
+// MCP server connections
+//
+// `auth_data_encrypted` stores an AES-GCM ciphertext (base64) containing the
+// OAuth tokens and other secrets. It MUST be decrypted with the
+// `MCP_ENCRYPTION_KEY` secret before use. Never return this column to clients.
+//
+// `discovery_meta` stores non-sensitive, server-authored metadata from the
+// OAuth discovery document (server name, icon URL, scopes offered). Safe to
+// surface to the client.
+//
+// `last_error` stores a *sanitized*, user-facing error string. It MUST NOT
+// contain tokens, headers, or raw upstream responses.
+export const mcpServer = sqliteTable(
+  "mcp_server",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    serverUrl: text("server_url").notNull(),
+    status: text("status").notNull().default("pending"),
+    authDataEncrypted: text("auth_data_encrypted"),
+    discoveryMeta: text("discovery_meta"),
+    lastTestedAt: integer("last_tested_at", { mode: "timestamp" }),
+    lastError: text("last_error"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [uniqueIndex("mcp_server_user_url_unique").on(table.userId, table.serverUrl)],
+);
