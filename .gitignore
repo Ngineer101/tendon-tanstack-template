@@ -13,3 +13,7 @@ __unconfig*
 todos.json
 .zed
 .vscode
+
+# Wrangler local secrets
+.dev.vars
+.dev.vars.*
