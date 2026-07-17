@@ -93,6 +93,7 @@ function Billing() {
     <div className="mx-auto max-w-6xl px-4 py-10">
       <Link
         to="/dashboard"
+        search={{ mcp: undefined, message: undefined }}
         className="mb-8 inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="size-4" />
